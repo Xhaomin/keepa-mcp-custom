@@ -119,35 +119,32 @@ export class KeepaTools {
   // ============================================
   async lookupProduct(params: z.infer<typeof ProductLookupSchema>): Promise<string> {
     try {
-      // Validate: require either ASIN or code
       if (!params.asin && !params.code) {
-        return 'Error: Either ASIN or code (EAN/UPC/ISBN) is required';
+        return 'Error: Either ASIN or code (EAN/UPC) is required';
       }
-
-      const queryParams = {
-        days: params.days || 30,
-        history: params.history !== false,
-        offers: params.offers || 20,
-        variations: params.variations,
-        rating: params.rating !== false,
-        buybox: true,
-      };
-
+      
       let product;
       if (params.code) {
-        // Search by EAN/UPC/ISBN code
         const products = await this.client.getProduct({ 
           code: params.code, 
-          domain: params.domain as KeepaDomain, 
-          ...queryParams 
+          domain: params.domain as KeepaDomain,
+          days: params.days,
+          history: params.history,
+          offers: params.offers,
+          rating: params.rating,
         });
         product = products?.[0];
       } else {
-        // Search by ASIN
         product = await this.client.getProductByAsin(
           params.asin!,
           params.domain as KeepaDomain,
-          queryParams
+          {
+            days: params.days,
+            history: params.history,
+            offers: params.offers,
+            variations: params.variations,
+            rating: params.rating,
+          }
         );
       }
 
@@ -172,7 +169,7 @@ export class KeepaTools {
       result += `🏢 **Marca**: ${product.brand || 'N/A'}\n`;
       result += `📊 **Categoria**: ${product.productGroup || 'N/A'}\n\n`;
 
-      // Extract pricing data
+      // Pricing data
       const buyBoxPrice = product.stats?.buyBoxPrice;
       const buyBoxUsedPrice = product.stats?.buyBoxUsedPrice;
       const avgPrice = product.stats?.avg?.[0];
@@ -189,7 +186,7 @@ export class KeepaTools {
       const fbaOffers = product.offers?.filter(o => o.isFBA && !o.isAmazon).length || 0;
       const fbmOffers = product.offers?.filter(o => !o.isFBA && !o.isAmazon).length || 0;
       
-      // Buy Box info
+      // Buy Box info from stats
       const buyBoxIsFBA = (product.stats as any)?.buyBoxIsFBA;
       const buyBoxIsAmazon = (product.stats as any)?.buyBoxIsAmazon;
       const buyBoxShippingCountry = (product.stats as any)?.buyBoxShippingCountry;
@@ -222,7 +219,6 @@ export class KeepaTools {
       else if (buyBoxUsedPrice && buyBoxUsedPrice > 0) ganador = 'Vendedor 3P (Usado)';
       result += `   - Ganador: ${ganador}\n`;
       
-      // Condición: Nuevo solo si buyBoxPrice > 0, Usado solo si buyBoxUsedPrice > 0 y no hay buyBoxPrice
       if (buyBoxPrice && buyBoxPrice > 0) {
         result += `   - Condición: Nuevo\n`;
       } else if (buyBoxUsedPrice && buyBoxUsedPrice > 0) {
@@ -258,7 +254,7 @@ export class KeepaTools {
       if (referralFee) result += `   - Comisión referral: ${referralFee}%\n`;
       if (pickAndPackFee) result += `   - Tarifa FBA: ${this.client.formatPrice(pickAndPackFee, domain)}\n`;
 
-      // VARIACIONES section
+      // Variations
       if (params.variations && product.variations && product.variations.length > 0) {
         result += `\n🔄 **VARIACIONES**: ${product.variations.length} disponibles\n`;
       }
