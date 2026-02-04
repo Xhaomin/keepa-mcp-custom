@@ -3,7 +3,8 @@ import { KeepaClient } from './keepa-client.js';
 import { KeepaDomain, KeepaDataType, ProductFinderResult, CategoryInsights, SalesVelocityData, InventoryAnalysis } from './types.js';
 
 export const ProductLookupSchema = z.object({
-  asin: z.string().describe('Amazon ASIN (product identifier)'),
+  asin: z.string().optional().describe('Amazon ASIN (product identifier)'),
+  code: z.string().optional().describe('Product code (EAN, UPC, ISBN-13) - alternative to ASIN'),
   domain: z.number().min(1).max(11).default(1).describe('Amazon domain (1=US, 2=UK, 3=DE, etc.)'),
   days: z.number().min(1).max(365).optional().describe('Number of days of price history to include'),
   history: z.boolean().default(false).describe('Include full price history'),
@@ -120,65 +121,131 @@ export class KeepaTools {
 
   async lookupProduct(params: z.infer<typeof ProductLookupSchema>): Promise<string> {
     try {
-      const product = await this.client.getProductByAsin(
-        params.asin,
-        params.domain as KeepaDomain,
-        {
+      if (!params.asin && !params.code) {
+        return 'Error: Either ASIN or code (EAN/UPC) is required';
+      }
+      
+      let product;
+      if (params.code) {
+        const products = await this.client.getProduct({ 
+          code: params.code, 
+          domain: params.domain as KeepaDomain,
           days: params.days,
           history: params.history,
           offers: params.offers,
-          variations: params.variations,
           rating: params.rating,
-        }
-      );
+        });
+        product = products?.[0];
+      } else {
+        product = await this.client.getProductByAsin(
+          params.asin!,
+          params.domain as KeepaDomain,
+          {
+            days: params.days,
+            history: params.history,
+            offers: params.offers,
+            variations: params.variations,
+            rating: params.rating,
+          }
+        );
+      }
 
       if (!product) {
-        return `Product not found for ASIN: ${params.asin}`;
+        return `Product not found for ${params.asin ? 'ASIN: ' + params.asin : 'Code: ' + params.code}`;
       }
 
       const domain = params.domain as KeepaDomain;
       const domainName = this.client.getDomainName(domain);
+      const asin = product.asin || params.asin || 'N/A';
       
-      let result = `**Product Information for ${params.asin}**\n\n`;
+      const imageUrl = product.imagesCSV 
+        ? `https://m.media-amazon.com/images/I/${product.imagesCSV.split(',')[0]}`
+        : null;
+
+      let result = `**Product Information for ${asin}**\n\n`;
       result += `🏪 **Marketplace**: ${domainName}\n`;
-      result += `📦 **Title**: ${product.title || 'N/A'}\n`;
-      result += `🏷️ **Brand**: ${product.brand || 'N/A'}\n`;
-      result += `📊 **Category**: ${product.productGroup || 'N/A'}\n`;
+      result += `📦 **ASIN**: ${asin}\n`;
+      if (imageUrl) result += `📷 **Imagen**: ${imageUrl}\n`;
+      result += `🏷️ **Titulo**: ${product.title || 'N/A'}\n`;
+      result += `🏢 **Marca**: ${product.brand || 'N/A'}\n`;
+      result += `📊 **Categoria**: ${product.productGroup || 'N/A'}\n\n`;
 
-      if (product.stats) {
-        const currentPrice = product.stats.current[0];
-        if (currentPrice && currentPrice !== -1) {
-          result += `💰 **Current Price**: ${this.client.formatPrice(currentPrice, domain)}\n`;
-        }
+      const buyBoxPrice = product.stats?.buyBoxPrice;
+      const buyBoxUsedPrice = product.stats?.buyBoxUsedPrice;
+      const avgPrice = product.stats?.avg?.[0];
+      const minPrice = product.stats?.min?.[0];
+      const maxPrice = product.stats?.max?.[0];
+      const salesRank = product.stats?.salesRankReference;
+      const monthlySold = (product as any).monthlySold || 0;
+      const rating = product.stats?.current?.[16] ? product.stats.current[16] / 10 : null;
+      const reviewCount = product.stats?.current?.[17] || 0;
+      
+      const offerCount = product.offers?.length || 0;
+      const amazonOffers = product.offers?.filter(o => o.isAmazon).length || 0;
+      const fbaOffers = product.offers?.filter(o => o.isFBA && !o.isAmazon).length || 0;
+      const fbmOffers = product.offers?.filter(o => !o.isFBA && !o.isAmazon).length || 0;
+      
+      const buyBoxIsFBA = (product.stats as any)?.buyBoxIsFBA;
+      const buyBoxIsAmazon = (product.stats as any)?.buyBoxIsAmazon;
+      const buyBoxShippingCountry = (product.stats as any)?.buyBoxShippingCountry;
+      
+      const referralFee = (product as any).referralFeePercentage;
+      const pickAndPackFee = (product as any).fbaFees?.pickAndPackFee;
 
-        const avgPrice = product.stats.avg[0];
-        if (avgPrice && avgPrice !== -1) {
-          result += `📈 **Average Price**: ${this.client.formatPrice(avgPrice, domain)}\n`;
-        }
-
-        if (product.stats.salesRankReference) {
-          result += `📊 **Sales Rank**: #${product.stats.salesRankReference.toLocaleString()}\n`;
-        }
+      result += `💰 **PRECIOS:**\n`;
+      if (buyBoxPrice && buyBoxPrice > 0) {
+        result += `   - Buy Box: ${this.client.formatPrice(buyBoxPrice, domain)} (Nuevo)\n`;
+      } else if (buyBoxUsedPrice && buyBoxUsedPrice > 0) {
+        result += `   - Buy Box: ${this.client.formatPrice(buyBoxUsedPrice, domain)} (⚠️ USADO)\n`;
+      }
+      if (avgPrice && avgPrice > 0) result += `   - Promedio 30d: ${this.client.formatPrice(avgPrice, domain)}\n`;
+      if (minPrice && minPrice > 0) result += `   - Mínimo 30d: ${this.client.formatPrice(minPrice, domain)}\n`;
+      if (maxPrice && maxPrice > 0) result += `   - Máximo 30d: ${this.client.formatPrice(maxPrice, domain)}\n`;
+      if (minPrice && maxPrice && minPrice > 0 && maxPrice > 0 && minPrice !== maxPrice) {
+        const variation = Math.round(((maxPrice - minPrice) / minPrice) * 100);
+        result += `   - Variación: ${variation}%\n`;
       }
 
-      if (params.rating && product.stats?.current[16]) {
-        const rating = product.stats.current[16] / 10;
-        const reviewCount = product.stats.current[17];
-        result += `⭐ **Rating**: ${rating.toFixed(1)}/5.0 (${reviewCount} reviews)\n`;
+      result += `\n🏆 **BUY BOX:**\n`;
+      let ganador = 'Sin Buy Box';
+      if (buyBoxIsAmazon) ganador = 'Amazon';
+      else if (buyBoxIsFBA) ganador = 'Vendedor 3P (FBA)';
+      else if (buyBoxPrice && buyBoxPrice > 0) ganador = 'Vendedor 3P (FBM)';
+      else if (buyBoxUsedPrice && buyBoxUsedPrice > 0) ganador = 'Vendedor 3P (Usado)';
+      result += `   - Ganador: ${ganador}\n`;
+      
+      if (buyBoxPrice && buyBoxPrice > 0) {
+        result += `   - Condición: Nuevo\n`;
+      } else if (buyBoxUsedPrice && buyBoxUsedPrice > 0) {
+        result += `   - Condición: ⚠️ USADO\n`;
+      }
+      if (buyBoxShippingCountry) result += `   - País envío: ${buyBoxShippingCountry}\n`;
+
+      if (salesRank) result += `\n📊 **Sales Rank**: #${salesRank.toLocaleString()}\n`;
+
+      result += `\n⭐ **RESEÑAS:**\n`;
+      if (rating) result += `   - Rating: ${rating.toFixed(1)}/5.0\n`;
+      result += `   - Total: ${reviewCount.toLocaleString()} reseñas\n`;
+
+      result += `\n🏪 **COMPETENCIA:**\n`;
+      result += `   - Total ofertas: ${offerCount}\n`;
+      result += `   - Ofertas FBA: ${fbaOffers}\n`;
+      result += `   - Ofertas FBM: ${fbmOffers}\n`;
+      result += `   - Amazon vende: ${amazonOffers > 0 ? 'Sí' : 'No'}\n`;
+
+      if (monthlySold > 0) {
+        result += `\n📈 **VELOCIDAD DE VENTAS (30 días):**\n`;
+        result += `   - Mensuales: ${monthlySold} unidades\n`;
+        result += `   - Diarias: ${(monthlySold / 30).toFixed(1)} unidades\n`;
+        result += `   - Semanales: ${(monthlySold / 4.3).toFixed(1)} unidades\n`;
       }
 
-      if (product.offers && product.offers.length > 0) {
-        result += `\n**Marketplace Offers**: ${product.offers.length} available\n`;
-        const topOffers = product.offers.slice(0, 3);
-        topOffers.forEach((offer, i) => {
-          result += `${i + 1}. ${offer.isAmazon ? '🟦 Amazon' : '🏪 3P Seller'} - `;
-          result += `${offer.isPrime ? '⚡ Prime' : 'Standard'} - `;
-          result += `${offer.isFBA ? 'FBA' : 'FBM'}\n`;
-        });
-      }
+      result += `\n💶 **COSTES AMAZON:**\n`;
+      if (referralFee) result += `   - Comisión referral: ${referralFee}%\n`;
+      if (pickAndPackFee) result += `   - Tarifa FBA: ${this.client.formatPrice(pickAndPackFee, domain)}\n`;
 
       if (params.variations && product.variations && product.variations.length > 0) {
-        result += `\n**Variations**: ${product.variations.length} available\n`;
+        result += `\n🔄 **VARIACIONES**: ${product.variations.length} disponibles\n`;
       }
 
       return result;
