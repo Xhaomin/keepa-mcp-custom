@@ -1,0 +1,126 @@
+name: Sync Fork with Upstream
+
+on:
+  # Ejecutar automáticamente cada lunes y jueves a las 7:00 UTC
+  schedule:
+    - cron: '0 7 * * 1,4'
+  
+  # Permitir ejecución manual desde GitHub
+  workflow_dispatch:
+    inputs:
+      force_sync:
+        description: 'Forzar sincronización (puede sobrescribir conflictos)'
+        type: boolean
+        default: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    name: Sync with cosjef/Keepa_MCP
+    
+    steps:
+      # Checkout tu fork
+      - name: Checkout Fork
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      # Configurar Git
+      - name: Configure Git
+        run: |
+          git config user.name "GitHub Action"
+          git config user.email "action@github.com"
+
+      # Agregar upstream remoto
+      - name: Add Upstream Remote
+        run: |
+          git remote add upstream https://github.com/cosjef/Keepa_MCP.git || true
+          git fetch upstream
+
+      # Intentar merge con upstream
+      - name: Sync with Upstream
+        id: sync
+        run: |
+          # Guardar estado actual
+          CURRENT_COMMIT=$(git rev-parse HEAD)
+          UPSTREAM_COMMIT=$(git rev-parse upstream/main)
+          
+          echo "current_commit=$CURRENT_COMMIT" >> $GITHUB_OUTPUT
+          echo "upstream_commit=$UPSTREAM_COMMIT" >> $GITHUB_OUTPUT
+          
+          # Verificar si hay cambios
+          if git merge-base --is-ancestor upstream/main HEAD; then
+            echo "✅ Fork ya está actualizado con upstream"
+            echo "has_updates=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          echo "has_updates=true" >> $GITHUB_OUTPUT
+          
+          # Intentar merge
+          if git merge upstream/main --no-edit; then
+            echo "✅ Merge exitoso"
+            echo "merge_success=true" >> $GITHUB_OUTPUT
+          else
+            echo "⚠️ Conflictos detectados"
+            echo "merge_success=false" >> $GITHUB_OUTPUT
+            
+            # Si force_sync está habilitado, resolver conflictos manteniendo nuestros cambios
+            if [ "${{ inputs.force_sync }}" == "true" ]; then
+              echo "Forzando resolución manteniendo nuestros cambios..."
+              git checkout --ours .
+              git add .
+              git commit -m "Merge upstream with conflicts resolved (keeping local changes)"
+              echo "merge_success=true" >> $GITHUB_OUTPUT
+            else
+              git merge --abort
+              exit 1
+            fi
+          fi
+
+      # Push cambios
+      - name: Push Changes
+        if: steps.sync.outputs.has_updates == 'true' && steps.sync.outputs.merge_success == 'true'
+        run: git push origin main
+
+      # Crear issue si hay conflictos
+      - name: Create Issue on Conflict
+        if: steps.sync.outputs.has_updates == 'true' && steps.sync.outputs.merge_success == 'false'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: '⚠️ Conflictos al sincronizar con upstream',
+              body: `Se detectaron conflictos al intentar sincronizar con el repositorio original.
+              
+              **Upstream commit:** ${{ steps.sync.outputs.upstream_commit }}
+              **Tu commit actual:** ${{ steps.sync.outputs.current_commit }}
+              
+              **Pasos para resolver:**
+              1. Clona tu fork localmente
+              2. Ejecuta: \`git fetch upstream && git merge upstream/main\`
+              3. Resuelve los conflictos manualmente
+              4. Commit y push
+              
+              O ejecuta el workflow manualmente con "Force sync" habilitado.`,
+              labels: ['sync-conflict', 'needs-attention']
+            });
+
+      # Resumen
+      - name: Summary
+        run: |
+          echo "## Sync Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ steps.sync.outputs.has_updates }}" == "true" ]; then
+            if [ "${{ steps.sync.outputs.merge_success }}" == "true" ]; then
+              echo "✅ Fork sincronizado exitosamente con upstream" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "❌ Conflictos detectados - se creó un issue" >> $GITHUB_STEP_SUMMARY
+            fi
+          else
+            echo "ℹ️ No hay actualizaciones nuevas en upstream" >> $GITHUB_STEP_SUMMARY
+          fi
