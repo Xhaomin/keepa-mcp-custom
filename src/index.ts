@@ -56,7 +56,7 @@ const TOOL_DEFINITIONS: Tool[] = [
         variations: { type: 'boolean', default: false, description: 'Include product variations' },
         rating: { type: 'boolean', default: false, description: 'Include product rating data' },
       },
-      required: ['asin'],
+      required: [],
     },
   },
   {
