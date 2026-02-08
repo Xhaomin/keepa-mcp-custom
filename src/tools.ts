@@ -122,33 +122,24 @@ export class KeepaTools {
 async lookupProduct(params: z.infer<typeof ProductLookupSchema>): Promise<string> {
     try {
       if (!params.asin && !params.code) {
-        return 'Error: Either ASIN or code (EAN/UPC) is required';
+        return 'Error: Se requiere ASIN o código EAN/UPC';
       }
 
-      // Build Keepa API query params with proper defaults
-      // Keepa API docs:
-      //   stats=N  → price stats for last N days (FREE)
-      //   offers=N → live offers, min 20 max 100 (6 tokens/10 offer pages)
-      //   rating=1 → RATING + COUNT_REVIEWS in csv/stats (up to 1 extra token)
-      //   When offers is used, buybox param is redundant
-      const queryParams: Record<string, any> = {
+      // Estos params son los que funcionaban en n8n
+      const queryParams = {
         domain: params.domain,
-        stats: params.days || 30,
+        days: params.days || 30,
+        history: true,
         offers: params.offers || 20,
-        rating: 1,
+        variations: params.variations,
+        rating: true,
+        buybox: true,
       };
-
-      if (params.days) queryParams.days = params.days;
-      if (params.history === false) queryParams.history = 0;
-      if (params.variations) queryParams.variations = params.variations;
 
       let product;
       if (params.code) {
-        const products = await this.client.getProduct({
-          code: params.code,
-          ...queryParams,
-        });
-        product = products?.[0];
+        const products = await this.client.getProduct({ code: params.code, ...queryParams });
+        product = products?.[0] || null;
       } else {
         product = await this.client.getProductByAsin(
           params.asin!,
@@ -164,242 +155,101 @@ async lookupProduct(params: z.infer<typeof ProductLookupSchema>): Promise<string
       const domain = params.domain as KeepaDomain;
       const domainName = this.client.getDomainName(domain);
       const asin = product.asin || params.asin || 'N/A';
-      const stats = product.stats;
-
-      // Helper: Keepa uses -1 for "no data available"
-      // Prices are integers in smallest currency unit (euro cents, yen, etc.)
-      // Rating is integer 0-50 (e.g. 45 = 4.5 stars)
-      const kv = (v: number | undefined | null): number | null =>
-        v !== undefined && v !== null && v !== -1 ? v : null;
 
       const imageUrl = product.imagesCSV
         ? `https://m.media-amazon.com/images/I/${product.imagesCSV.split(',')[0]}`
         : null;
 
-      // ══════════ HEADER ══════════
       let result = `**Product Information for ${asin}**\n\n`;
       result += `🏪 **Marketplace**: ${domainName}\n`;
       result += `📦 **ASIN**: ${asin}\n`;
       if (imageUrl) result += `📷 **Imagen**: ${imageUrl}\n`;
       result += `🏷️ **Titulo**: ${product.title || 'N/A'}\n`;
       result += `🏢 **Marca**: ${product.brand || 'N/A'}\n`;
-      result += `📊 **Categoria**: ${product.productGroup || 'N/A'}\n`;
+      result += `📊 **Categoria**: ${product.productGroup || 'N/A'}\n\n`;
 
-      if (stats) {
-        // ══════════ PRECIOS ══════════
-        // stats.current[N] = current value for csv index N
-        // stats.avg[N] = weighted average over stats period
-        // stats.min[N] / stats.max[N] = min/max over stats period
-        // CSV indexes: 0=AMAZON, 1=NEW, 2=USED, 3=SALES_RANK, 4=LISTPRICE,
-        //   9=WAREHOUSE, 10=NEW_FBA, 11=COUNT_NEW, 12=COUNT_USED,
-        //   16=RATING, 17=COUNT_REVIEWS, 18=BUY_BOX_SHIPPING
-        const buyBoxPrice = kv(stats.buyBoxPrice);
-        const buyBoxUsedPrice = kv((stats as any).buyBoxUsedPrice);
+      const buyBoxPrice = product.stats?.buyBoxPrice;
+      const buyBoxUsedPrice = (product.stats as any)?.buyBoxUsedPrice;
+      const currentAmazon = product.stats?.current?.[0];
+      const avgPrice = product.stats?.avg?.[0];
+      const minPrice = product.stats?.min?.[0];
+      const maxPrice = product.stats?.max?.[0];
+      const salesRank = product.stats?.current?.[3];
+      const monthlySold = (product as any).monthlySold || (product.stats as any)?.monthlySold || 0;
+      const ratingRaw = product.stats?.current?.[16];
+      const reviewCount = product.stats?.current?.[17];
 
-        result += `\n💰 **PRECIOS:**\n`;
+      const offerCount = product.offers?.length || 0;
+      const amazonOffers = product.offers?.filter((o: any) => o.isAmazon).length || 0;
+      const fbaOffers = product.offers?.filter((o: any) => o.isFBA && !o.isAmazon).length || 0;
 
-        // Buy Box
-        if (buyBoxPrice) {
-          const isUsed = (stats as any).buyBoxIsUsed;
-          result += `   - Buy Box: ${this.client.formatPrice(buyBoxPrice, domain)} (${isUsed ? '⚠️ USADO' : 'Nuevo'})\n`;
-        } else if (buyBoxUsedPrice) {
-          result += `   - Buy Box: ${this.client.formatPrice(buyBoxUsedPrice, domain)} (⚠️ USADO)\n`;
-        }
+      const buyBoxIsFBA = (product.stats as any)?.buyBoxIsFBA;
+      const buyBoxIsAmazon = (product.stats as any)?.buyBoxIsAmazon;
+      const buyBoxIsUsed = (product.stats as any)?.buyBoxIsUsed;
+      const buyBoxShippingCountry = (product.stats as any)?.buyBoxShippingCountry;
 
-        // List Price / PVP
-        const listPrice = kv(stats.current?.[4]);
-        if (listPrice) result += `   - PVP/MSRP: ${this.client.formatPrice(listPrice, domain)}\n`;
-
-        // Amazon price: current + average
-        const currentAmazon = kv(stats.current?.[0]);
-        const avgAmazon = kv(stats.avg?.[0]);
-        const minAmazon = kv(stats.min?.[0]);
-        const maxAmazon = kv(stats.max?.[0]);
-
-        if (currentAmazon) result += `   - Amazon (actual): ${this.client.formatPrice(currentAmazon, domain)}\n`;
-        if (avgAmazon) {
-          result += `   - Amazon (promedio ${params.days || 30}d): ${this.client.formatPrice(avgAmazon, domain)}`;
-          if (minAmazon && maxAmazon && minAmazon !== maxAmazon) {
-            result += ` (min ${this.client.formatPrice(minAmazon, domain)} / max ${this.client.formatPrice(maxAmazon, domain)})`;
-          }
-          result += '\n';
-        }
-
-        // New 3P
-        const currentNew = kv(stats.current?.[1]);
-        const avgNew = kv(stats.avg?.[1]);
-        if (currentNew) result += `   - New 3P (actual): ${this.client.formatPrice(currentNew, domain)}\n`;
-        if (avgNew && avgNew !== currentNew) result += `   - New 3P (promedio): ${this.client.formatPrice(avgNew, domain)}\n`;
-
-        // FBA 3P
-        const currentFBA = kv(stats.current?.[10]);
-        if (currentFBA) result += `   - New FBA 3P: ${this.client.formatPrice(currentFBA, domain)}\n`;
-
-        // Warehouse
-        const currentWarehouse = kv(stats.current?.[9]);
-        if (currentWarehouse) result += `   - Warehouse Deals: ${this.client.formatPrice(currentWarehouse, domain)}\n`;
-
-        // Used
-        const currentUsed = kv(stats.current?.[2]);
-        const avgUsed = kv(stats.avg?.[2]);
-        if (currentUsed) result += `   - Usado (actual): ${this.client.formatPrice(currentUsed, domain)}\n`;
-        else if (avgUsed) result += `   - Usado (promedio): ${this.client.formatPrice(avgUsed, domain)}\n`;
-
-        // Price variation %
-        if (minAmazon && maxAmazon && minAmazon > 0 && maxAmazon > 0 && minAmazon !== maxAmazon) {
-          const variation = Math.round(((maxAmazon - minAmazon) / minAmazon) * 100);
-          result += `   - Variación precio: ${variation}%\n`;
-        }
-
-        // ══════════ BUY BOX ══════════
-        result += `\n🏆 **BUY BOX:**\n`;
-        const buyBoxIsAmazon = (stats as any).buyBoxIsAmazon;
-        const buyBoxIsFBA = (stats as any).buyBoxIsFBA;
-
-        let ganador = 'Sin Buy Box';
-        if (buyBoxIsAmazon) ganador = 'Amazon';
-        else if (buyBoxIsFBA) ganador = 'Vendedor 3P (FBA)';
-        else if (buyBoxPrice) ganador = 'Vendedor 3P (FBM)';
-        else if (buyBoxUsedPrice) ganador = 'Vendedor 3P (Usado)';
-        result += `   - Ganador: ${ganador}\n`;
-
-        if ((stats as any).buyBoxIsUsed) result += `   - Condición: ⚠️ USADO\n`;
-        if ((stats as any).buyBoxShippingCountry) result += `   - País envío: ${(stats as any).buyBoxShippingCountry}\n`;
-
-        if (product.buyBoxSellerIdHistory && product.buyBoxSellerIdHistory.length >= 2) {
-          const lastSeller = String(product.buyBoxSellerIdHistory[product.buyBoxSellerIdHistory.length - 1]);
-          if (lastSeller && lastSeller !== '-1' && lastSeller !== '-2') {
-            result += `   - Seller ID: ${lastSeller}\n`;
-          }
-        }
-
-        if ((product as any).isSNS) result += `   - Subscribe & Save: ✅\n`;
-
-        // ══════════ SALES RANK ══════════
-        const currentSalesRank = kv(stats.current?.[3]);
-        if (currentSalesRank) {
-          result += `\n📊 **Sales Rank**: #${currentSalesRank.toLocaleString()}`;
-          const salesRankRef = kv(stats.salesRankReference);
-          if (salesRankRef && salesRankRef !== currentSalesRank) {
-            result += ` (ref: #${salesRankRef.toLocaleString()})`;
-          }
-          result += '\n';
-        }
-
-        // ══════════ RATING & REVIEWS ══════════
-        // csv[16] = RATING (0-50 integer, 45 = 4.5 stars). -1 = no data
-        // csv[17] = COUNT_REVIEWS. -1 = no data
-        const ratingRaw = kv(stats.current?.[16]);
-        const reviewCount = kv(stats.current?.[17]);
-        if (ratingRaw || reviewCount) {
-          result += `\n⭐ **RESEÑAS:**\n`;
-          if (ratingRaw) result += `   - Rating: ${(ratingRaw / 10).toFixed(1)}/5.0\n`;
-          if (reviewCount) result += `   - Total: ${reviewCount.toLocaleString()} reseñas\n`;
-        }
-      }
-
-      // ══════════ MONTHLY SOLD ══════════
-      const monthlySold = kv((product as any).monthlySold) || kv((stats as any)?.monthlySold);
-      if (monthlySold && monthlySold > 0) {
-        result += `\n📈 **VENTAS (bought past month):**\n`;
-        result += `   - Mensuales: ${monthlySold.toLocaleString()}+ unidades\n`;
-        result += `   - Diarias: ~${(monthlySold / 30).toFixed(1)} unidades\n`;
-      }
-
-      // ══════════ OFFERS / COMPETITION ══════════
-      // product.offers = all offers (historical + live)
-      // product.liveOffersOrder = ordered indexes of LIVE offers only
-      if (product.offers && product.offers.length > 0) {
-        const liveIndexes = (product as any).liveOffersOrder as number[] | null;
-        let liveOffers: any[];
-
-        if (liveIndexes && liveIndexes.length > 0) {
-          const uniqueIndexes = [...new Set(liveIndexes)];
-          liveOffers = uniqueIndexes.map((idx: number) => product.offers![idx]).filter(Boolean);
-        } else {
-          liveOffers = product.offers;
-        }
-
-        const totalLive = liveOffers.length;
-        const amazonOffers = liveOffers.filter((o: any) => o.isAmazon).length;
-        const fbaOffers = liveOffers.filter((o: any) => o.isFBA && !o.isAmazon).length;
-        const fbmOffers = totalLive - amazonOffers - fbaOffers;
-
-        result += `\n🏪 **COMPETENCIA (${totalLive} ofertas vivas):**\n`;
-        result += `   - Amazon vende: ${amazonOffers > 0 ? `Sí (${amazonOffers})` : 'No'}\n`;
-        result += `   - Vendedores FBA: ${fbaOffers}\n`;
-        result += `   - Vendedores FBM: ${fbmOffers}\n`;
-
-        const countNew = kv(stats?.current?.[11]);
-        const countUsed = kv(stats?.current?.[12]);
-        if (countNew) result += `   - Ofertas New totales: ${countNew}\n`;
-        if (countUsed) result += `   - Ofertas Used totales: ${countUsed}\n`;
-
-        // Top 5 offers
-        if (totalLive > 0) {
-          result += `\n   **Top ${Math.min(5, totalLive)} ofertas:**\n`;
-          liveOffers.slice(0, 5).forEach((offer: any, i: number) => {
-            const offerCSV = offer.offerCSV;
-            const price = offerCSV && offerCSV.length >= 2 ? kv(offerCSV[offerCSV.length - 1]) : null;
-            const shippingCSV = offer.shippingCSV;
-            const shipping = shippingCSV && shippingCSV.length >= 2 ? kv(shippingCSV[shippingCSV.length - 1]) : null;
-
-            const sellerType = offer.isAmazon ? 'Amazon' : offer.isFBA ? 'FBA' : 'FBM';
-            const conditionMap: Record<number, string> = {
-              1: 'Nuevo', 2: 'Usado-Como Nuevo', 3: 'Usado-Muy Bueno',
-              4: 'Usado-Bueno', 5: 'Usado-Aceptable',
-            };
-            const condition = conditionMap[offer.condition] || (offer.condition > 1 ? 'Usado' : 'Nuevo');
-
-            let line = `   ${i + 1}. [${sellerType}] ${condition}`;
-            if (price) {
-              line += ` — ${this.client.formatPrice(price, domain)}`;
-              if (shipping && shipping > 0) line += ` + ${this.client.formatPrice(shipping, domain)} envío`;
-            }
-            if (offer.isPrime) line += ' 🟢 Prime';
-            if (offer.sellerId) line += ` (${offer.sellerId})`;
-            result += line + '\n';
-          });
-        }
-
-        if ((product as any).offersSuccessful !== undefined) {
-          result += `\n   _Ofertas: ${(product as any).offersSuccessful ? '✅ Actualizadas' : '⚠️ Datos históricos'}_\n`;
-        }
-      } else {
-        const countNew = kv(stats?.current?.[11]);
-        if (countNew) {
-          result += `\n🏪 **COMPETENCIA**: ${countNew} ofertas New (datos históricos)\n`;
-        } else {
-          result += `\n🏪 **COMPETENCIA**: Sin datos de ofertas\n`;
-        }
-      }
-
-      // ══════════ COSTES AMAZON ══════════
       const referralFee = (product as any).referralFeePercentage;
       const pickAndPackFee = (product as any).fbaFees?.pickAndPackFee;
-      if (referralFee || pickAndPackFee) {
-        result += `\n💶 **COSTES AMAZON:**\n`;
-        if (referralFee) result += `   - Comisión referral: ${referralFee}%\n`;
-        if (pickAndPackFee) result += `   - Tarifa FBA: ${this.client.formatPrice(pickAndPackFee, domain)}\n`;
+
+      result += `💰 **PRECIOS:**\n`;
+      if (buyBoxPrice && buyBoxPrice !== -1) {
+        const condition = buyBoxIsUsed ? '⚠️ USADO' : 'Nuevo';
+        result += `   • Buy Box: ${this.client.formatPrice(buyBoxPrice, domain)} (${condition})\n`;
+      } else if (buyBoxUsedPrice && buyBoxUsedPrice !== -1) {
+        result += `   • Buy Box: ${this.client.formatPrice(buyBoxUsedPrice, domain)} (⚠️ USADO)\n`;
+      }
+      if (currentAmazon && currentAmazon !== -1) result += `   • Amazon (actual): ${this.client.formatPrice(currentAmazon, domain)}\n`;
+      if (avgPrice && avgPrice !== -1) result += `   • Promedio 30d: ${this.client.formatPrice(avgPrice, domain)}\n`;
+      if (minPrice && minPrice !== -1) result += `   • Mínimo 30d: ${this.client.formatPrice(minPrice, domain)}\n`;
+      if (maxPrice && maxPrice !== -1) result += `   • Máximo 30d: ${this.client.formatPrice(maxPrice, domain)}\n`;
+
+      result += `\n🏆 **BUY BOX:**\n`;
+      let ganador = 'Sin Buy Box';
+      if (buyBoxIsAmazon) ganador = 'Amazon';
+      else if (buyBoxIsFBA) ganador = 'Vendedor FBA 3P';
+      else if (buyBoxPrice && buyBoxPrice !== -1) ganador = 'Vendedor FBM 3P';
+      else if (buyBoxUsedPrice && buyBoxUsedPrice !== -1) ganador = 'Vendedor 3P (Usado)';
+      result += `   • Ganador: ${ganador}\n`;
+      if (buyBoxPrice && buyBoxPrice !== -1) {
+        result += `   • Condición: ${buyBoxIsUsed ? '⚠️ USADO' : 'Nuevo'}\n`;
+      }
+      if (buyBoxShippingCountry) result += `   • País envío: ${buyBoxShippingCountry}\n`;
+
+      if (salesRank && salesRank !== -1) {
+        result += `\n📊 **Sales Rank**: #${salesRank.toLocaleString()}\n`;
       }
 
-      // ══════════ VARIACIONES ══════════
+      result += `\n⭐ **RESEÑAS:**\n`;
+      if (ratingRaw && ratingRaw !== -1 && ratingRaw > 0) {
+        result += `   • Rating: ${(ratingRaw / 10).toFixed(1)}/5.0\n`;
+      } else {
+        result += `   • Rating: Sin datos\n`;
+      }
+      if (reviewCount && reviewCount !== -1 && reviewCount > 0) {
+        result += `   • Total: ${reviewCount.toLocaleString()} reseñas\n`;
+      } else {
+        result += `   • Total: Sin datos\n`;
+      }
+
+      result += `\n🏪 **COMPETENCIA:**\n`;
+      result += `   • Total ofertas: ${offerCount}\n`;
+      result += `   • Ofertas FBA: ${fbaOffers}\n`;
+      result += `   • Ofertas FBM: ${offerCount - fbaOffers - amazonOffers}\n`;
+      result += `   • Amazon vende: ${amazonOffers > 0 ? 'Sí' : 'No'}\n`;
+
+      if (monthlySold > 0) {
+        result += `\n📈 **VELOCIDAD DE VENTAS (30 días):**\n`;
+        result += `   • Mensuales: ${monthlySold} unidades\n`;
+        result += `   • Diarias: ${(monthlySold / 30).toFixed(1)} unidades\n`;
+        result += `   • Semanales: ${(monthlySold / 4.3).toFixed(1)} unidades\n`;
+      }
+
+      result += `\n💶 **COSTES AMAZON:**\n`;
+      if (referralFee) result += `   • Comisión referral: ${referralFee}%\n`;
+      if (pickAndPackFee) result += `   • Tarifa FBA: ${this.client.formatPrice(pickAndPackFee, domain)}\n`;
+
       if (params.variations && product.variations && product.variations.length > 0) {
         result += `\n🔄 **VARIACIONES**: ${product.variations.length} disponibles\n`;
-      }
-
-      // ══════════ DATOS ADICIONALES ══════════
-      if ((product as any).parentAsin) result += `\n🔗 **Parent ASIN**: ${(product as any).parentAsin}\n`;
-      if ((product as any).ean) result += `🔢 **EAN**: ${(product as any).ean}\n`;
-      if (product.packageWeight) result += `⚖️ **Peso**: ${product.packageWeight}g\n`;
-
-      // Out of stock %
-      const oos30 = stats?.outOfStockPercentage30;
-      const oos90 = stats?.outOfStockPercentage90;
-      if (oos30 !== undefined || oos90 !== undefined) {
-        result += `\n📦 **DISPONIBILIDAD:**\n`;
-        if (oos30 !== undefined) result += `   - Fuera de stock (30d): ${oos30}%\n`;
-        if (oos90 !== undefined) result += `   - Fuera de stock (90d): ${oos90}%\n`;
       }
 
       return result;
