@@ -203,17 +203,31 @@ async lookupProduct(params: z.infer<typeof ProductLookupSchema>): Promise<string
       if (minPrice && minPrice !== -1) result += `   • Mínimo 30d: ${this.client.formatPrice(minPrice, domain)}\n`;
       if (maxPrice && maxPrice !== -1) result += `   • Máximo 30d: ${this.client.formatPrice(maxPrice, domain)}\n`;
 
+      const hasBuyBoxNew = buyBoxPrice && buyBoxPrice !== -1;
+      const hasBuyBoxUsed = buyBoxUsedPrice && buyBoxUsedPrice !== -1;
+
       result += `\n🏆 **BUY BOX:**\n`;
-      let ganador = 'Sin Buy Box';
-      if (buyBoxIsAmazon) ganador = 'Amazon';
-      else if (buyBoxIsFBA) ganador = 'Vendedor FBA 3P';
-      else if (buyBoxPrice && buyBoxPrice !== -1) ganador = 'Vendedor FBM 3P';
-      else if (buyBoxUsedPrice && buyBoxUsedPrice !== -1) ganador = 'Vendedor 3P (Usado)';
-      result += `   • Ganador: ${ganador}\n`;
-      if (buyBoxPrice && buyBoxPrice !== -1) {
-        result += `   • Condición: ${buyBoxIsUsed ? '⚠️ USADO' : 'Nuevo'}\n`;
+      if (hasBuyBoxNew || hasBuyBoxUsed) {
+        if (buyBoxIsUsed && hasBuyBoxUsed) {
+          result += `   • Precio: ${this.client.formatPrice(buyBoxUsedPrice, domain)} (⚠️ USADO)\n`;
+          let ganador = 'Vendedor 3P (Usado)';
+          if (buyBoxIsAmazon) ganador = 'Amazon (Usado)';
+          else if (buyBoxIsFBA) ganador = 'Vendedor FBA (Usado)';
+          result += `   • Ganador: ${ganador}\n`;
+        } else if (hasBuyBoxNew) {
+          result += `   • Precio: ${this.client.formatPrice(buyBoxPrice, domain)} (Nuevo)\n`;
+          let ganador = 'Vendedor FBM 3P';
+          if (buyBoxIsAmazon) ganador = 'Amazon';
+          else if (buyBoxIsFBA) ganador = 'Vendedor FBA 3P';
+          result += `   • Ganador: ${ganador}\n`;
+        }
+        if (buyBoxShippingCountry) result += `   • País envío: ${buyBoxShippingCountry}\n`;
+        if (hasBuyBoxNew && hasBuyBoxUsed) {
+          result += `   • Buy Box Usado también disponible: ${this.client.formatPrice(buyBoxUsedPrice, domain)}\n`;
+        }
+      } else {
+        result += `   • Ganador: Sin Buy Box\n`;
       }
-      if (buyBoxShippingCountry) result += `   • País envío: ${buyBoxShippingCountry}\n`;
 
       if (salesRank && salesRank !== -1) {
         result += `\n📊 **Sales Rank**: #${salesRank.toLocaleString()}\n`;
