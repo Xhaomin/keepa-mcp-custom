@@ -119,24 +119,28 @@ export const TokenStatusSchema = z.object({});
 export class KeepaTools {
   constructor(private client: KeepaClient) {}
 
-  async lookupProduct(params: z.infer<typeof ProductLookupSchema>): Promise<string> {
+async lookupProduct(params: z.infer<typeof ProductLookupSchema>): Promise<string> {
     try {
       if (!params.asin && !params.code) {
-        return 'Error: Se requiere ASIN o código EAN/UPC';
+        return 'Error: Either ASIN or code (EAN/UPC) is required';
       }
 
-      // Build query params for Keepa API
+      // Build Keepa API query params with proper defaults
+      // Keepa API docs:
+      //   stats=N  → price stats for last N days (FREE)
+      //   offers=N → live offers, min 20 max 100 (6 tokens/10 offer pages)
+      //   rating=1 → RATING + COUNT_REVIEWS in csv/stats (up to 1 extra token)
+      //   When offers is used, buybox param is redundant
       const queryParams: Record<string, any> = {
         domain: params.domain,
-        stats: params.days || 30,       // stats=N → price stats for last N days (free)
-        offers: params.offers || 20,    // min 20 per Keepa API (6 tokens per 10 offer pages)
-        rating: 1,                      // include rating/review history (up to 1 extra token)
+        stats: params.days || 30,
+        offers: params.offers || 20,
+        rating: 1,
       };
 
-      // Optional params
       if (params.days) queryParams.days = params.days;
       if (params.history === false) queryParams.history = 0;
-      // Note: when offers is used, buybox data is included automatically (no need for buybox param)
+      if (params.variations) queryParams.variations = params.variations;
 
       let product;
       if (params.code) {
@@ -144,7 +148,7 @@ export class KeepaTools {
           code: params.code,
           ...queryParams,
         });
-        product = products?.[0] || null;
+        product = products?.[0];
       } else {
         product = await this.client.getProductByAsin(
           params.asin!,
@@ -160,18 +164,19 @@ export class KeepaTools {
       const domain = params.domain as KeepaDomain;
       const domainName = this.client.getDomainName(domain);
       const asin = product.asin || params.asin || 'N/A';
+      const stats = product.stats;
+
+      // Helper: Keepa uses -1 for "no data available"
+      // Prices are integers in smallest currency unit (euro cents, yen, etc.)
+      // Rating is integer 0-50 (e.g. 45 = 4.5 stars)
+      const kv = (v: number | undefined | null): number | null =>
+        v !== undefined && v !== null && v !== -1 ? v : null;
 
       const imageUrl = product.imagesCSV
         ? `https://m.media-amazon.com/images/I/${product.imagesCSV.split(',')[0]}`
         : null;
 
-      // Helper: Keepa uses -1 for "no data available"
-      const kv = (v: number | undefined | null): number | null =>
-        v !== undefined && v !== null && v !== -1 ? v : null;
-
-      const stats = product.stats;
-
-      // ========== HEADER ==========
+      // ══════════ HEADER ══════════
       let result = `**Product Information for ${asin}**\n\n`;
       result += `🏪 **Marketplace**: ${domainName}\n`;
       result += `📦 **ASIN**: ${asin}\n`;
@@ -180,76 +185,112 @@ export class KeepaTools {
       result += `🏢 **Marca**: ${product.brand || 'N/A'}\n`;
       result += `📊 **Categoria**: ${product.productGroup || 'N/A'}\n`;
 
-      // ========== PRICES ==========
       if (stats) {
+        // ══════════ PRECIOS ══════════
+        // stats.current[N] = current value for csv index N
+        // stats.avg[N] = weighted average over stats period
+        // stats.min[N] / stats.max[N] = min/max over stats period
+        // CSV indexes: 0=AMAZON, 1=NEW, 2=USED, 3=SALES_RANK, 4=LISTPRICE,
+        //   9=WAREHOUSE, 10=NEW_FBA, 11=COUNT_NEW, 12=COUNT_USED,
+        //   16=RATING, 17=COUNT_REVIEWS, 18=BUY_BOX_SHIPPING
         const buyBoxPrice = kv(stats.buyBoxPrice);
-        const avgAmazon = kv(stats.avg?.[0]);     // csv index 0 = AMAZON price
-        const avgNew = kv(stats.avg?.[1]);         // csv index 1 = Marketplace New
-        const avgUsed = kv(stats.avg?.[2]);        // csv index 2 = Marketplace Used
-        const minAmazon = kv(stats.min?.[0]);
-        const maxAmazon = kv(stats.max?.[0]);
-        const minNew = kv(stats.min?.[1]);
-        const maxNew = kv(stats.max?.[1]);
-        const avgFBA = kv(stats.avg?.[10]);        // csv index 10 = NEW_FBA
-        const avgWarehouse = kv(stats.avg?.[9]);   // csv index 9 = WAREHOUSE
-        const listPrice = kv(stats.current?.[4]);  // csv index 4 = LIST PRICE (MSRP/PVP)
+        const buyBoxUsedPrice = kv((stats as any).buyBoxUsedPrice);
 
         result += `\n💰 **PRECIOS:**\n`;
+
+        // Buy Box
         if (buyBoxPrice) {
-          const condition = stats.buyBoxIsUsed ? '⚠️ USADO' : 'Nuevo';
-          result += `   - Buy Box: ${this.client.formatPrice(buyBoxPrice, domain)} (${condition})\n`;
+          const isUsed = (stats as any).buyBoxIsUsed;
+          result += `   - Buy Box: ${this.client.formatPrice(buyBoxPrice, domain)} (${isUsed ? '⚠️ USADO' : 'Nuevo'})\n`;
+        } else if (buyBoxUsedPrice) {
+          result += `   - Buy Box: ${this.client.formatPrice(buyBoxUsedPrice, domain)} (⚠️ USADO)\n`;
         }
+
+        // List Price / PVP
+        const listPrice = kv(stats.current?.[4]);
         if (listPrice) result += `   - PVP/MSRP: ${this.client.formatPrice(listPrice, domain)}\n`;
+
+        // Amazon price: current + average
+        const currentAmazon = kv(stats.current?.[0]);
+        const avgAmazon = kv(stats.avg?.[0]);
+        const minAmazon = kv(stats.min?.[0]);
+        const maxAmazon = kv(stats.max?.[0]);
+
+        if (currentAmazon) result += `   - Amazon (actual): ${this.client.formatPrice(currentAmazon, domain)}\n`;
         if (avgAmazon) {
-          result += `   - Amazon: Promedio ${this.client.formatPrice(avgAmazon, domain)}`;
+          result += `   - Amazon (promedio ${params.days || 30}d): ${this.client.formatPrice(avgAmazon, domain)}`;
           if (minAmazon && maxAmazon && minAmazon !== maxAmazon) {
             result += ` (min ${this.client.formatPrice(minAmazon, domain)} / max ${this.client.formatPrice(maxAmazon, domain)})`;
           }
           result += '\n';
         }
-        if (avgNew) {
-          result += `   - New 3P: Promedio ${this.client.formatPrice(avgNew, domain)}`;
-          if (minNew && maxNew && minNew !== maxNew) {
-            result += ` (min ${this.client.formatPrice(minNew, domain)} / max ${this.client.formatPrice(maxNew, domain)})`;
-          }
-          result += '\n';
+
+        // New 3P
+        const currentNew = kv(stats.current?.[1]);
+        const avgNew = kv(stats.avg?.[1]);
+        if (currentNew) result += `   - New 3P (actual): ${this.client.formatPrice(currentNew, domain)}\n`;
+        if (avgNew && avgNew !== currentNew) result += `   - New 3P (promedio): ${this.client.formatPrice(avgNew, domain)}\n`;
+
+        // FBA 3P
+        const currentFBA = kv(stats.current?.[10]);
+        if (currentFBA) result += `   - New FBA 3P: ${this.client.formatPrice(currentFBA, domain)}\n`;
+
+        // Warehouse
+        const currentWarehouse = kv(stats.current?.[9]);
+        if (currentWarehouse) result += `   - Warehouse Deals: ${this.client.formatPrice(currentWarehouse, domain)}\n`;
+
+        // Used
+        const currentUsed = kv(stats.current?.[2]);
+        const avgUsed = kv(stats.avg?.[2]);
+        if (currentUsed) result += `   - Usado (actual): ${this.client.formatPrice(currentUsed, domain)}\n`;
+        else if (avgUsed) result += `   - Usado (promedio): ${this.client.formatPrice(avgUsed, domain)}\n`;
+
+        // Price variation %
+        if (minAmazon && maxAmazon && minAmazon > 0 && maxAmazon > 0 && minAmazon !== maxAmazon) {
+          const variation = Math.round(((maxAmazon - minAmazon) / minAmazon) * 100);
+          result += `   - Variación precio: ${variation}%\n`;
         }
-        if (avgFBA) result += `   - New FBA 3P: Promedio ${this.client.formatPrice(avgFBA, domain)}\n`;
-        if (avgWarehouse) result += `   - Warehouse Deals: Promedio ${this.client.formatPrice(avgWarehouse, domain)}\n`;
-        if (avgUsed) result += `   - Usado: Promedio ${this.client.formatPrice(avgUsed, domain)}\n`;
 
-        // ========== BUY BOX ==========
+        // ══════════ BUY BOX ══════════
         result += `\n🏆 **BUY BOX:**\n`;
-        let ganador = 'Sin Buy Box';
-        if (stats.buyBoxIsAmazon) ganador = 'Amazon';
-        else if (stats.buyBoxIsFBA) ganador = 'Vendedor FBA 3P';
-        else if (buyBoxPrice) ganador = 'Vendedor FBM 3P';
-        result += `   - Ganador: ${ganador}\n`;
-        if (stats.buyBoxShippingCountry) result += `   - País envío: ${stats.buyBoxShippingCountry}\n`;
+        const buyBoxIsAmazon = (stats as any).buyBoxIsAmazon;
+        const buyBoxIsFBA = (stats as any).buyBoxIsFBA;
 
-        // Buy Box seller info from history (last entry)
+        let ganador = 'Sin Buy Box';
+        if (buyBoxIsAmazon) ganador = 'Amazon';
+        else if (buyBoxIsFBA) ganador = 'Vendedor 3P (FBA)';
+        else if (buyBoxPrice) ganador = 'Vendedor 3P (FBM)';
+        else if (buyBoxUsedPrice) ganador = 'Vendedor 3P (Usado)';
+        result += `   - Ganador: ${ganador}\n`;
+
+        if ((stats as any).buyBoxIsUsed) result += `   - Condición: ⚠️ USADO\n`;
+        if ((stats as any).buyBoxShippingCountry) result += `   - País envío: ${(stats as any).buyBoxShippingCountry}\n`;
+
         if (product.buyBoxSellerIdHistory && product.buyBoxSellerIdHistory.length >= 2) {
-          const lastSeller = product.buyBoxSellerIdHistory[product.buyBoxSellerIdHistory.length - 1];
+          const lastSeller = String(product.buyBoxSellerIdHistory[product.buyBoxSellerIdHistory.length - 1]);
           if (lastSeller && lastSeller !== '-1' && lastSeller !== '-2') {
             result += `   - Seller ID: ${lastSeller}\n`;
           }
         }
 
-        // isSNS
-        if (product.isSNS) result += `   - Subscribe & Save: ✅ Disponible\n`;
+        if ((product as any).isSNS) result += `   - Subscribe & Save: ✅\n`;
 
-        // ========== SALES RANK ==========
-        const salesRank = kv(stats.current?.[3]);  // csv index 3 = SALES RANK
-        const salesRankRef = kv(stats.salesRankReference);
-        if (salesRank) {
-          result += `\n📊 **Sales Rank**: #${salesRank.toLocaleString()}`;
-          if (salesRankRef && salesRankRef !== salesRank) result += ` (referencia: #${salesRankRef.toLocaleString()})`;
+        // ══════════ SALES RANK ══════════
+        const currentSalesRank = kv(stats.current?.[3]);
+        if (currentSalesRank) {
+          result += `\n📊 **Sales Rank**: #${currentSalesRank.toLocaleString()}`;
+          const salesRankRef = kv(stats.salesRankReference);
+          if (salesRankRef && salesRankRef !== currentSalesRank) {
+            result += ` (ref: #${salesRankRef.toLocaleString()})`;
+          }
           result += '\n';
         }
 
-        // ========== RATING & REVIEWS ==========
-        const ratingRaw = kv(stats.current?.[16]);  // csv index 16 = RATING
-        const reviewCount = kv(stats.current?.[17]); // csv index 17 = COUNT_REVIEWS
+        // ══════════ RATING & REVIEWS ══════════
+        // csv[16] = RATING (0-50 integer, 45 = 4.5 stars). -1 = no data
+        // csv[17] = COUNT_REVIEWS. -1 = no data
+        const ratingRaw = kv(stats.current?.[16]);
+        const reviewCount = kv(stats.current?.[17]);
         if (ratingRaw || reviewCount) {
           result += `\n⭐ **RESEÑAS:**\n`;
           if (ratingRaw) result += `   - Rating: ${(ratingRaw / 10).toFixed(1)}/5.0\n`;
@@ -257,28 +298,26 @@ export class KeepaTools {
         }
       }
 
-      // ========== MONTHLY SOLD ==========
-      const monthlySold = kv(product.monthlySold) || kv(stats?.monthlySold);
+      // ══════════ MONTHLY SOLD ══════════
+      const monthlySold = kv((product as any).monthlySold) || kv((stats as any)?.monthlySold);
       if (monthlySold && monthlySold > 0) {
-        result += `\n📈 **VENTAS ESTIMADAS (bought past month):**\n`;
+        result += `\n📈 **VENTAS (bought past month):**\n`;
         result += `   - Mensuales: ${monthlySold.toLocaleString()}+ unidades\n`;
         result += `   - Diarias: ~${(monthlySold / 30).toFixed(1)} unidades\n`;
       }
 
-      // ========== OFFERS / COMPETITION ==========
+      // ══════════ OFFERS / COMPETITION ══════════
+      // product.offers = all offers (historical + live)
+      // product.liveOffersOrder = ordered indexes of LIVE offers only
       if (product.offers && product.offers.length > 0) {
-        // Use liveOffersOrder for currently active offers
-        const liveIndexes = product.liveOffersOrder;
+        const liveIndexes = (product as any).liveOffersOrder as number[] | null;
         let liveOffers: any[];
 
         if (liveIndexes && liveIndexes.length > 0) {
-          // Deduplicate indexes (Keepa puts duplicates for identical offers)
-          const uniqueIndexes = [...new Set(liveIndexes)] as number[];
-          liveOffers = uniqueIndexes.map((idx: number) => product.offers[idx]).filter(Boolean);
+          const uniqueIndexes = [...new Set(liveIndexes)];
+          liveOffers = uniqueIndexes.map((idx: number) => product.offers![idx]).filter(Boolean);
         } else {
-          // Fallback: filter by lastSeen recency (within last 24h)
-          const oneDayAgo = Date.now() - 86400000;
-          liveOffers = product.offers.filter((o: any) => o.lastSeen && o.lastSeen > oneDayAgo);
+          liveOffers = product.offers;
         }
 
         const totalLive = liveOffers.length;
@@ -287,31 +326,30 @@ export class KeepaTools {
         const fbmOffers = totalLive - amazonOffers - fbaOffers;
 
         result += `\n🏪 **COMPETENCIA (${totalLive} ofertas vivas):**\n`;
-        result += `   - Amazon vende: ${amazonOffers > 0 ? `Sí (${amazonOffers} oferta${amazonOffers > 1 ? 's' : ''})` : 'No'}\n`;
+        result += `   - Amazon vende: ${amazonOffers > 0 ? `Sí (${amazonOffers})` : 'No'}\n`;
         result += `   - Vendedores FBA: ${fbaOffers}\n`;
         result += `   - Vendedores FBM: ${fbmOffers}\n`;
 
-        // New/Used offer counts from csv
         const countNew = kv(stats?.current?.[11]);
         const countUsed = kv(stats?.current?.[12]);
-        if (countNew) result += `   - Total ofertas New (hist.): ${countNew}\n`;
-        if (countUsed) result += `   - Total ofertas Used (hist.): ${countUsed}\n`;
+        if (countNew) result += `   - Ofertas New totales: ${countNew}\n`;
+        if (countUsed) result += `   - Ofertas Used totales: ${countUsed}\n`;
 
-        // Top 5 live offers detail
+        // Top 5 offers
         if (totalLive > 0) {
           result += `\n   **Top ${Math.min(5, totalLive)} ofertas:**\n`;
           liveOffers.slice(0, 5).forEach((offer: any, i: number) => {
-            // Get latest price from offerCSV (last value pair: [keepaTime, price, ...])
             const offerCSV = offer.offerCSV;
             const price = offerCSV && offerCSV.length >= 2 ? kv(offerCSV[offerCSV.length - 1]) : null;
-            const shipping = offer.shippingCSV && offer.shippingCSV.length >= 2
-              ? kv(offer.shippingCSV[offer.shippingCSV.length - 1])
-              : null;
+            const shippingCSV = offer.shippingCSV;
+            const shipping = shippingCSV && shippingCSV.length >= 2 ? kv(shippingCSV[shippingCSV.length - 1]) : null;
 
             const sellerType = offer.isAmazon ? 'Amazon' : offer.isFBA ? 'FBA' : 'FBM';
-            const condition = offer.conditionComment
-              ? offer.conditionComment.substring(0, 40)
-              : (offer.isUsed ? 'Usado' : 'Nuevo');
+            const conditionMap: Record<number, string> = {
+              1: 'Nuevo', 2: 'Usado-Como Nuevo', 3: 'Usado-Muy Bueno',
+              4: 'Usado-Bueno', 5: 'Usado-Aceptable',
+            };
+            const condition = conditionMap[offer.condition] || (offer.condition > 1 ? 'Usado' : 'Nuevo');
 
             let line = `   ${i + 1}. [${sellerType}] ${condition}`;
             if (price) {
@@ -319,44 +357,50 @@ export class KeepaTools {
               if (shipping && shipping > 0) line += ` + ${this.client.formatPrice(shipping, domain)} envío`;
             }
             if (offer.isPrime) line += ' 🟢 Prime';
-            if (offer.sellerId) line += ` (${offer.sellerId.substring(0, 14)})`;
+            if (offer.sellerId) line += ` (${offer.sellerId})`;
             result += line + '\n';
           });
         }
 
-        // Offer data freshness
-        if (product.offersSuccessful !== undefined) {
-          result += `\n   _Datos de ofertas: ${product.offersSuccessful ? '✅ Actualizados' : '⚠️ No se pudieron actualizar, datos históricos'}_\n`;
+        if ((product as any).offersSuccessful !== undefined) {
+          result += `\n   _Ofertas: ${(product as any).offersSuccessful ? '✅ Actualizadas' : '⚠️ Datos históricos'}_\n`;
         }
       } else {
-        result += `\n🏪 **COMPETENCIA**: No se encontraron ofertas activas\n`;
+        const countNew = kv(stats?.current?.[11]);
+        if (countNew) {
+          result += `\n🏪 **COMPETENCIA**: ${countNew} ofertas New (datos históricos)\n`;
+        } else {
+          result += `\n🏪 **COMPETENCIA**: Sin datos de ofertas\n`;
+        }
       }
 
-      // ========== FBA FEES ==========
-      const referralFee = product.referralFeePercentage;
-      const pickAndPackFee = product.fbaFees?.pickAndPackFee;
+      // ══════════ COSTES AMAZON ══════════
+      const referralFee = (product as any).referralFeePercentage;
+      const pickAndPackFee = (product as any).fbaFees?.pickAndPackFee;
       if (referralFee || pickAndPackFee) {
         result += `\n💶 **COSTES AMAZON:**\n`;
         if (referralFee) result += `   - Comisión referral: ${referralFee}%\n`;
-        if (pickAndPackFee) result += `   - Tarifa FBA (pick&pack): ${this.client.formatPrice(pickAndPackFee, domain)}\n`;
+        if (pickAndPackFee) result += `   - Tarifa FBA: ${this.client.formatPrice(pickAndPackFee, domain)}\n`;
       }
 
-      // ========== VARIATIONS ==========
+      // ══════════ VARIACIONES ══════════
       if (params.variations && product.variations && product.variations.length > 0) {
         result += `\n🔄 **VARIACIONES**: ${product.variations.length} disponibles\n`;
-        product.variations.slice(0, 10).forEach((v: any) => {
-          result += `   - ${v.asin}${v.attributes ? ': ' + Object.values(v.attributes).join(', ') : ''}\n`;
-        });
-        if (product.variations.length > 10) {
-          result += `   ... y ${product.variations.length - 10} más\n`;
-        }
       }
 
-      // ========== ADDITIONAL DATA ==========
-      if (product.parentAsin) result += `\n🔗 **Parent ASIN**: ${product.parentAsin}\n`;
-      if (product.numberOfItems) result += `📦 **Unidades por pack**: ${product.numberOfItems}\n`;
+      // ══════════ DATOS ADICIONALES ══════════
+      if ((product as any).parentAsin) result += `\n🔗 **Parent ASIN**: ${(product as any).parentAsin}\n`;
+      if ((product as any).ean) result += `🔢 **EAN**: ${(product as any).ean}\n`;
       if (product.packageWeight) result += `⚖️ **Peso**: ${product.packageWeight}g\n`;
-      if (product.ean) result += `🔢 **EAN**: ${product.ean}\n`;
+
+      // Out of stock %
+      const oos30 = stats?.outOfStockPercentage30;
+      const oos90 = stats?.outOfStockPercentage90;
+      if (oos30 !== undefined || oos90 !== undefined) {
+        result += `\n📦 **DISPONIBILIDAD:**\n`;
+        if (oos30 !== undefined) result += `   - Fuera de stock (30d): ${oos30}%\n`;
+        if (oos90 !== undefined) result += `   - Fuera de stock (90d): ${oos90}%\n`;
+      }
 
       return result;
     } catch (error) {
