@@ -322,7 +322,6 @@ async lookupProduct(params: z.infer<typeof ProductLookupSchema>): Promise<string
       return `Error looking up product: ${error instanceof Error ? error.message : 'Unknown error'}`;
     }
   }
-
   async batchLookupProducts(params: z.infer<typeof BatchProductLookupSchema>): Promise<string> {
     try {
       const products = await this.client.getProductsBatch(
