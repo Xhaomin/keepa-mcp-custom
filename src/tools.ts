@@ -206,24 +206,31 @@ async lookupProduct(params: z.infer<typeof ProductLookupSchema>): Promise<string
       const hasBuyBoxNew = buyBoxPrice && buyBoxPrice !== -1;
       const hasBuyBoxUsed = buyBoxUsedPrice && buyBoxUsedPrice !== -1;
 
+      const buyBoxCondition = (product.stats as any)?.buyBoxCondition;
+      const hasBuyBoxNew = buyBoxPrice && buyBoxPrice !== -1;
+      const hasBuyBoxUsed = buyBoxUsedPrice && buyBoxUsedPrice !== -1;
+
       result += `\n🏆 **BUY BOX:**\n`;
       if (hasBuyBoxNew || hasBuyBoxUsed) {
-        if (buyBoxIsUsed && hasBuyBoxUsed) {
-          result += `   • Precio: ${this.client.formatPrice(buyBoxUsedPrice, domain)} (⚠️ USADO)\n`;
-          let ganador = 'Vendedor 3P (Usado)';
-          if (buyBoxIsAmazon) ganador = 'Amazon (Usado)';
-          else if (buyBoxIsFBA) ganador = 'Vendedor FBA (Usado)';
-          result += `   • Ganador: ${ganador}\n`;
-        } else if (hasBuyBoxNew) {
-          result += `   • Precio: ${this.client.formatPrice(buyBoxPrice, domain)} (Nuevo)\n`;
-          let ganador = 'Vendedor FBM 3P';
-          if (buyBoxIsAmazon) ganador = 'Amazon';
-          else if (buyBoxIsFBA) ganador = 'Vendedor FBA 3P';
-          result += `   • Ganador: ${ganador}\n`;
-        }
+        // buyBoxCondition: 1=Nuevo, 2=Como Nuevo, 3=Muy Bueno, 4=Bueno, 5=Aceptable
+        const conditionMap: Record<number, string> = {
+          1: 'Nuevo', 2: 'Usado-Como Nuevo', 3: 'Usado-Muy Bueno',
+          4: 'Usado-Bueno', 5: 'Usado-Aceptable',
+        };
+        const mainCondition = conditionMap[buyBoxCondition] || 'Nuevo';
+        const mainPrice = hasBuyBoxNew ? buyBoxPrice : buyBoxUsedPrice;
+
+        result += `   • Precio: ${this.client.formatPrice(mainPrice, domain)} (${mainCondition})\n`;
+
+        let ganador = 'Vendedor FBM 3P';
+        if (buyBoxIsAmazon) ganador = 'Amazon';
+        else if (buyBoxIsFBA) ganador = 'Vendedor FBA 3P';
+        result += `   • Ganador: ${ganador}\n`;
         if (buyBoxShippingCountry) result += `   • País envío: ${buyBoxShippingCountry}\n`;
-        if (hasBuyBoxNew && hasBuyBoxUsed) {
-          result += `   • Buy Box Usado también disponible: ${this.client.formatPrice(buyBoxUsedPrice, domain)}\n`;
+
+        // buyBoxIsUsed = existe TAMBIÉN un Buy Box usado (separado del principal)
+        if (buyBoxIsUsed && hasBuyBoxUsed && hasBuyBoxNew) {
+          result += `   • Buy Box Usado disponible: ${this.client.formatPrice(buyBoxUsedPrice, domain)}\n`;
         }
       } else {
         result += `   • Ganador: Sin Buy Box\n`;
