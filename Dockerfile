@@ -1,53 +1,35 @@
-# ============================================
-# Dockerfile para Keepa MCP + n8n (supergateway)
-# ============================================
-
-# --- Stage 1: Build ---
-FROM node:20-alpine AS build
-
-# Instalar dependencias de compilación
-RUN apk add --no-cache git
+FROM node:20-alpine AS builder
 
 WORKDIR /app
 
-# Copiar archivos de dependencias
-COPY package*.json ./
+# Copy dependency files
+COPY package.json package-lock.json ./
 
-# Instalar TODAS las dependencias (incluyendo dev para build)
-RUN npm ci --include=dev
+# Install all dependencies (including dev for building)
+RUN npm ci
 
-# Copiar código fuente
+# Copy source
 COPY tsconfig.json ./
 COPY src/ ./src/
 
-# Compilar TypeScript
+# Build TypeScript
 RUN npm run build
 
-# Eliminar devDependencies para producción
-RUN npm prune --omit=dev
-
-# --- Stage 2: Production ---
+# ─── Production stage ───
 FROM node:20-alpine
-
-ENV NODE_ENV=production
-ENV PORT=8080
 
 WORKDIR /app
 
-# Copiar solo lo necesario desde build
-COPY --from=build /app/dist ./dist
-COPY --from=build /app/node_modules ./node_modules
-COPY --from=build /app/package*.json ./
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev
 
-# Instalar supergateway globalmente
-RUN npm install -g supergateway
+COPY --from=builder /app/dist/ ./dist/
 
-# Exponer puerto
+# Default port (matches Easypanel PORT env var)
 EXPOSE 8080
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-  CMD wget --no-verbose --tries=1 --spider http://localhost:${PORT}/health || exit 1
+# Health check for Easypanel
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD wget --no-verbose --tries=1 --spider http://localhost:${PORT:-8080}/health || exit 1
 
-# Comando de inicio con supergateway
-CMD ["sh", "-c", "exec supergateway --stdio \"node /app/dist/index.js\" --outputTransport streamableHttp --stateful --sessionTimeout 600000 --port ${PORT} --streamableHttpPath /mcp --healthEndpoint /health"]
+CMD ["node", "dist/index.js"]
