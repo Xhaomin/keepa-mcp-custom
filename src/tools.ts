@@ -125,15 +125,16 @@ async lookupProduct(params: z.infer<typeof ProductLookupSchema>): Promise<string
         return 'Error: Se requiere ASIN o código EAN/UPC';
       }
 
-      // Estos params son los que funcionaban en n8n
       const queryParams = {
         domain: params.domain,
-        days: params.days || 30,
+        stats: 90,              // FREE: avg/min/max sobre 90 días
+        days: params.days || 90,
         history: true,
         offers: params.offers || 20,
         variations: params.variations,
         rating: true,
         buybox: true,
+        stock: 1,               // 2 tokens extra: stockCSV en offers
       };
 
       let product;
@@ -187,29 +188,27 @@ async lookupProduct(params: z.infer<typeof ProductLookupSchema>): Promise<string
       const buyBoxIsAmazon = (product.stats as any)?.buyBoxIsAmazon;
       const buyBoxIsUsed = (product.stats as any)?.buyBoxIsUsed;
       const buyBoxShippingCountry = (product.stats as any)?.buyBoxShippingCountry;
+      const buyBoxCondition = (product.stats as any)?.buyBoxCondition;
 
       const referralFee = (product as any).referralFeePercentage;
       const pickAndPackFee = (product as any).fbaFees?.pickAndPackFee;
 
+      // ── PRECIOS ──
+      const hasBuyBoxNew = buyBoxPrice && buyBoxPrice !== -1;
+      const hasBuyBoxUsed = buyBoxUsedPrice && buyBoxUsedPrice !== -1;
+
       result += `💰 **PRECIOS:**\n`;
-      if (buyBoxPrice && buyBoxPrice !== -1) {
-        const condition = buyBoxIsUsed ? '⚠️ USADO' : 'Nuevo';
-        result += `   • Buy Box: ${this.client.formatPrice(buyBoxPrice, domain)} (${condition})\n`;
-      } else if (buyBoxUsedPrice && buyBoxUsedPrice !== -1) {
-        result += `   • Buy Box: ${this.client.formatPrice(buyBoxUsedPrice, domain)} (⚠️ USADO)\n`;
+      if (hasBuyBoxNew) {
+        result += `   • Buy Box: ${this.client.formatPrice(buyBoxPrice, domain)}\n`;
+      } else if (hasBuyBoxUsed) {
+        result += `   • Buy Box (Usado): ${this.client.formatPrice(buyBoxUsedPrice, domain)}\n`;
       }
       if (currentAmazon && currentAmazon !== -1) result += `   • Amazon (actual): ${this.client.formatPrice(currentAmazon, domain)}\n`;
-      if (avgPrice && avgPrice !== -1) result += `   • Promedio 30d: ${this.client.formatPrice(avgPrice, domain)}\n`;
-      if (minPrice && minPrice !== -1) result += `   • Mínimo 30d: ${this.client.formatPrice(minPrice, domain)}\n`;
-      if (maxPrice && maxPrice !== -1) result += `   • Máximo 30d: ${this.client.formatPrice(maxPrice, domain)}\n`;
+      if (avgPrice && avgPrice !== -1) result += `   • Promedio 90d: ${this.client.formatPrice(avgPrice, domain)}\n`;
+      if (minPrice && minPrice !== -1) result += `   • Mínimo 90d: ${this.client.formatPrice(minPrice, domain)}\n`;
+      if (maxPrice && maxPrice !== -1) result += `   • Máximo 90d: ${this.client.formatPrice(maxPrice, domain)}\n`;
 
-      const hasBuyBoxNew = buyBoxPrice && buyBoxPrice !== -1;
-      const hasBuyBoxUsed = buyBoxUsedPrice && buyBoxUsedPrice !== -1;
-
-      const buyBoxCondition = (product.stats as any)?.buyBoxCondition;
-      const hasBuyBoxNew = buyBoxPrice && buyBoxPrice !== -1;
-      const hasBuyBoxUsed = buyBoxUsedPrice && buyBoxUsedPrice !== -1;
-
+      // ── BUY BOX ──
       result += `\n🏆 **BUY BOX:**\n`;
       if (hasBuyBoxNew || hasBuyBoxUsed) {
         // buyBoxCondition: 1=Nuevo, 2=Como Nuevo, 3=Muy Bueno, 4=Bueno, 5=Aceptable
@@ -236,10 +235,12 @@ async lookupProduct(params: z.infer<typeof ProductLookupSchema>): Promise<string
         result += `   • Ganador: Sin Buy Box\n`;
       }
 
+      // ── SALES RANK ──
       if (salesRank && salesRank !== -1) {
         result += `\n📊 **Sales Rank**: #${salesRank.toLocaleString()}\n`;
       }
 
+      // ── RESEÑAS ──
       result += `\n⭐ **RESEÑAS:**\n`;
       if (ratingRaw && ratingRaw !== -1 && ratingRaw > 0) {
         result += `   • Rating: ${(ratingRaw / 10).toFixed(1)}/5.0\n`;
@@ -252,12 +253,53 @@ async lookupProduct(params: z.infer<typeof ProductLookupSchema>): Promise<string
         result += `   • Total: Sin datos\n`;
       }
 
+      // ── COMPETENCIA ──
       result += `\n🏪 **COMPETENCIA:**\n`;
       result += `   • Total ofertas: ${offerCount}\n`;
       result += `   • Ofertas FBA: ${fbaOffers}\n`;
       result += `   • Ofertas FBM: ${offerCount - fbaOffers - amazonOffers}\n`;
       result += `   • Amazon vende: ${amazonOffers > 0 ? 'Sí' : 'No'}\n`;
 
+      // ── STOCK ──
+      if (product.offers && product.offers.length > 0) {
+        let buyBoxStock: number | null = null;
+        const buyBoxSellerId = (product.stats as any)?.buyBoxSellerId;
+
+        // Buscar stock del ganador del Buy Box primero
+        for (const offer of product.offers) {
+          const stockCSV = (offer as any).stockCSV;
+          if (!stockCSV || stockCSV.length < 2) continue;
+          if ((buyBoxSellerId && offer.sellerId === buyBoxSellerId) ||
+              offer.isBuyBoxWinner || offer.isAmazon) {
+            buyBoxStock = stockCSV[stockCSV.length - 1];
+            break;
+          }
+        }
+
+        // Si no encontramos del Buy Box, tomar el mayor stock de ofertas vivas
+        if (buyBoxStock === null) {
+          const liveIndexes = (product as any).liveOffersOrder as number[] | null;
+          if (liveIndexes && liveIndexes.length > 0) {
+            for (const idx of liveIndexes) {
+              const offer = product.offers[idx];
+              if (!offer) continue;
+              const stockCSV = (offer as any).stockCSV;
+              if (stockCSV && stockCSV.length >= 2) {
+                const qty = stockCSV[stockCSV.length - 1];
+                if (qty > 0 && (buyBoxStock === null || qty > buyBoxStock)) {
+                  buyBoxStock = qty;
+                }
+              }
+            }
+          }
+        }
+
+        if (buyBoxStock !== null && buyBoxStock > 0) {
+          result += `\n📦 **STOCK**: ${buyBoxStock} unidades disponibles\n`;
+        }
+      }
+
+      // ── VELOCIDAD DE VENTAS ──
       if (monthlySold > 0) {
         result += `\n📈 **VELOCIDAD DE VENTAS (30 días):**\n`;
         result += `   • Mensuales: ${monthlySold} unidades\n`;
@@ -265,10 +307,12 @@ async lookupProduct(params: z.infer<typeof ProductLookupSchema>): Promise<string
         result += `   • Semanales: ${(monthlySold / 4.3).toFixed(1)} unidades\n`;
       }
 
+      // ── COSTES AMAZON ──
       result += `\n💶 **COSTES AMAZON:**\n`;
       if (referralFee) result += `   • Comisión referral: ${referralFee}%\n`;
       if (pickAndPackFee) result += `   • Tarifa FBA: ${this.client.formatPrice(pickAndPackFee, domain)}\n`;
 
+      // ── VARIACIONES ──
       if (params.variations && product.variations && product.variations.length > 0) {
         result += `\n🔄 **VARIACIONES**: ${product.variations.length} disponibles\n`;
       }
