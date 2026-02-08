@@ -134,7 +134,7 @@ async lookupProduct(params: z.infer<typeof ProductLookupSchema>): Promise<string
         variations: params.variations,
         rating: true,
         buybox: true,
-        stock: 1,               // 2 tokens extra: stockCSV en offers
+        stock: true,               // 2 tokens extra: stockCSV en offers
       };
 
       let product;
