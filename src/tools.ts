@@ -8,7 +8,7 @@ export const ProductLookupSchema = z.object({
   domain: z.number().min(1).max(11).default(1).describe('Amazon domain (1=US, 2=UK, 3=DE, etc.)'),
   days: z.number().min(1).max(365).optional().describe('Number of days of price history to include'),
   history: z.boolean().default(false).describe('Include full price history'),
-  offers: z.number().min(0).max(100).optional().describe('Number of marketplace offers to include'),
+  offers: z.number().min(20).max(100).optional().describe('Number of marketplace offers to retrieve (min 20, max 100). Cost: 6 extra Keepa tokens per 10 offer pages found. Includes buybox, FBA/FBM prices, shipping, rating history, and live seller data.'),
   variations: z.boolean().default(false).describe('Include product variations'),
   rating: z.boolean().default(false).describe('Include product rating data'),
 });
@@ -122,31 +122,34 @@ export class KeepaTools {
   async lookupProduct(params: z.infer<typeof ProductLookupSchema>): Promise<string> {
     try {
       if (!params.asin && !params.code) {
-        return 'Error: Either ASIN or code (EAN/UPC) is required';
+        return 'Error: Se requiere ASIN o código EAN/UPC';
       }
-      
+
+      // Build query params for Keepa API
+      const queryParams: Record<string, any> = {
+        domain: params.domain,
+        stats: params.days || 30,       // stats=N → price stats for last N days (free)
+        offers: params.offers || 20,    // min 20 per Keepa API (6 tokens per 10 offer pages)
+        rating: 1,                      // include rating/review history (up to 1 extra token)
+      };
+
+      // Optional params
+      if (params.days) queryParams.days = params.days;
+      if (params.history === false) queryParams.history = 0;
+      // Note: when offers is used, buybox data is included automatically (no need for buybox param)
+
       let product;
       if (params.code) {
-        const products = await this.client.getProduct({ 
-          code: params.code, 
-          domain: params.domain as KeepaDomain,
-          days: params.days,
-          history: params.history,
-          offers: params.offers,
-          rating: params.rating,
+        const products = await this.client.getProduct({
+          code: params.code,
+          ...queryParams,
         });
-        product = products?.[0];
+        product = products?.[0] || null;
       } else {
         product = await this.client.getProductByAsin(
           params.asin!,
           params.domain as KeepaDomain,
-          {
-            days: params.days,
-            history: params.history,
-            offers: params.offers,
-            variations: params.variations,
-            rating: params.rating,
-          }
+          queryParams,
         );
       }
 
@@ -157,96 +160,203 @@ export class KeepaTools {
       const domain = params.domain as KeepaDomain;
       const domainName = this.client.getDomainName(domain);
       const asin = product.asin || params.asin || 'N/A';
-      
-      const imageUrl = product.imagesCSV 
+
+      const imageUrl = product.imagesCSV
         ? `https://m.media-amazon.com/images/I/${product.imagesCSV.split(',')[0]}`
         : null;
 
+      // Helper: Keepa uses -1 for "no data available"
+      const kv = (v: number | undefined | null): number | null =>
+        v !== undefined && v !== null && v !== -1 ? v : null;
+
+      const stats = product.stats;
+
+      // ========== HEADER ==========
       let result = `**Product Information for ${asin}**\n\n`;
       result += `🏪 **Marketplace**: ${domainName}\n`;
       result += `📦 **ASIN**: ${asin}\n`;
       if (imageUrl) result += `📷 **Imagen**: ${imageUrl}\n`;
       result += `🏷️ **Titulo**: ${product.title || 'N/A'}\n`;
       result += `🏢 **Marca**: ${product.brand || 'N/A'}\n`;
-      result += `📊 **Categoria**: ${product.productGroup || 'N/A'}\n\n`;
+      result += `📊 **Categoria**: ${product.productGroup || 'N/A'}\n`;
 
-      const buyBoxPrice = product.stats?.buyBoxPrice;
-      const buyBoxUsedPrice = product.stats?.buyBoxUsedPrice;
-      const avgPrice = product.stats?.avg?.[0];
-      const minPrice = product.stats?.min?.[0];
-      const maxPrice = product.stats?.max?.[0];
-      const salesRank = product.stats?.salesRankReference;
-      const monthlySold = (product as any).monthlySold || 0;
-      const rating = product.stats?.current?.[16] ? product.stats.current[16] / 10 : null;
-      const reviewCount = product.stats?.current?.[17] || 0;
-      
-      const offerCount = product.offers?.length || 0;
-      const amazonOffers = product.offers?.filter(o => o.isAmazon).length || 0;
-      const fbaOffers = product.offers?.filter(o => o.isFBA && !o.isAmazon).length || 0;
-      const fbmOffers = product.offers?.filter(o => !o.isFBA && !o.isAmazon).length || 0;
-      
-      const buyBoxIsFBA = (product.stats as any)?.buyBoxIsFBA;
-      const buyBoxIsAmazon = (product.stats as any)?.buyBoxIsAmazon;
-      const buyBoxShippingCountry = (product.stats as any)?.buyBoxShippingCountry;
-      
-      const referralFee = (product as any).referralFeePercentage;
-      const pickAndPackFee = (product as any).fbaFees?.pickAndPackFee;
+      // ========== PRICES ==========
+      if (stats) {
+        const buyBoxPrice = kv(stats.buyBoxPrice);
+        const avgAmazon = kv(stats.avg?.[0]);     // csv index 0 = AMAZON price
+        const avgNew = kv(stats.avg?.[1]);         // csv index 1 = Marketplace New
+        const avgUsed = kv(stats.avg?.[2]);        // csv index 2 = Marketplace Used
+        const minAmazon = kv(stats.min?.[0]);
+        const maxAmazon = kv(stats.max?.[0]);
+        const minNew = kv(stats.min?.[1]);
+        const maxNew = kv(stats.max?.[1]);
+        const avgFBA = kv(stats.avg?.[10]);        // csv index 10 = NEW_FBA
+        const avgWarehouse = kv(stats.avg?.[9]);   // csv index 9 = WAREHOUSE
+        const listPrice = kv(stats.current?.[4]);  // csv index 4 = LIST PRICE (MSRP/PVP)
 
-      result += `💰 **PRECIOS:**\n`;
-      if (buyBoxPrice && buyBoxPrice > 0) {
-        result += `   - Buy Box: ${this.client.formatPrice(buyBoxPrice, domain)} (Nuevo)\n`;
-      } else if (buyBoxUsedPrice && buyBoxUsedPrice > 0) {
-        result += `   - Buy Box: ${this.client.formatPrice(buyBoxUsedPrice, domain)} (⚠️ USADO)\n`;
+        result += `\n💰 **PRECIOS:**\n`;
+        if (buyBoxPrice) {
+          const condition = stats.buyBoxIsUsed ? '⚠️ USADO' : 'Nuevo';
+          result += `   - Buy Box: ${this.client.formatPrice(buyBoxPrice, domain)} (${condition})\n`;
+        }
+        if (listPrice) result += `   - PVP/MSRP: ${this.client.formatPrice(listPrice, domain)}\n`;
+        if (avgAmazon) {
+          result += `   - Amazon: Promedio ${this.client.formatPrice(avgAmazon, domain)}`;
+          if (minAmazon && maxAmazon && minAmazon !== maxAmazon) {
+            result += ` (min ${this.client.formatPrice(minAmazon, domain)} / max ${this.client.formatPrice(maxAmazon, domain)})`;
+          }
+          result += '\n';
+        }
+        if (avgNew) {
+          result += `   - New 3P: Promedio ${this.client.formatPrice(avgNew, domain)}`;
+          if (minNew && maxNew && minNew !== maxNew) {
+            result += ` (min ${this.client.formatPrice(minNew, domain)} / max ${this.client.formatPrice(maxNew, domain)})`;
+          }
+          result += '\n';
+        }
+        if (avgFBA) result += `   - New FBA 3P: Promedio ${this.client.formatPrice(avgFBA, domain)}\n`;
+        if (avgWarehouse) result += `   - Warehouse Deals: Promedio ${this.client.formatPrice(avgWarehouse, domain)}\n`;
+        if (avgUsed) result += `   - Usado: Promedio ${this.client.formatPrice(avgUsed, domain)}\n`;
+
+        // ========== BUY BOX ==========
+        result += `\n🏆 **BUY BOX:**\n`;
+        let ganador = 'Sin Buy Box';
+        if (stats.buyBoxIsAmazon) ganador = 'Amazon';
+        else if (stats.buyBoxIsFBA) ganador = 'Vendedor FBA 3P';
+        else if (buyBoxPrice) ganador = 'Vendedor FBM 3P';
+        result += `   - Ganador: ${ganador}\n`;
+        if (stats.buyBoxShippingCountry) result += `   - País envío: ${stats.buyBoxShippingCountry}\n`;
+
+        // Buy Box seller info from history (last entry)
+        if (product.buyBoxSellerIdHistory && product.buyBoxSellerIdHistory.length >= 2) {
+          const lastSeller = product.buyBoxSellerIdHistory[product.buyBoxSellerIdHistory.length - 1];
+          if (lastSeller && lastSeller !== '-1' && lastSeller !== '-2') {
+            result += `   - Seller ID: ${lastSeller}\n`;
+          }
+        }
+
+        // isSNS
+        if (product.isSNS) result += `   - Subscribe & Save: ✅ Disponible\n`;
+
+        // ========== SALES RANK ==========
+        const salesRank = kv(stats.current?.[3]);  // csv index 3 = SALES RANK
+        const salesRankRef = kv(stats.salesRankReference);
+        if (salesRank) {
+          result += `\n📊 **Sales Rank**: #${salesRank.toLocaleString()}`;
+          if (salesRankRef && salesRankRef !== salesRank) result += ` (referencia: #${salesRankRef.toLocaleString()})`;
+          result += '\n';
+        }
+
+        // ========== RATING & REVIEWS ==========
+        const ratingRaw = kv(stats.current?.[16]);  // csv index 16 = RATING
+        const reviewCount = kv(stats.current?.[17]); // csv index 17 = COUNT_REVIEWS
+        if (ratingRaw || reviewCount) {
+          result += `\n⭐ **RESEÑAS:**\n`;
+          if (ratingRaw) result += `   - Rating: ${(ratingRaw / 10).toFixed(1)}/5.0\n`;
+          if (reviewCount) result += `   - Total: ${reviewCount.toLocaleString()} reseñas\n`;
+        }
       }
-      if (avgPrice && avgPrice > 0) result += `   - Promedio 30d: ${this.client.formatPrice(avgPrice, domain)}\n`;
-      if (minPrice && minPrice > 0) result += `   - Mínimo 30d: ${this.client.formatPrice(minPrice, domain)}\n`;
-      if (maxPrice && maxPrice > 0) result += `   - Máximo 30d: ${this.client.formatPrice(maxPrice, domain)}\n`;
-      if (minPrice && maxPrice && minPrice > 0 && maxPrice > 0 && minPrice !== maxPrice) {
-        const variation = Math.round(((maxPrice - minPrice) / minPrice) * 100);
-        result += `   - Variación: ${variation}%\n`;
+
+      // ========== MONTHLY SOLD ==========
+      const monthlySold = kv(product.monthlySold) || kv(stats?.monthlySold);
+      if (monthlySold && monthlySold > 0) {
+        result += `\n📈 **VENTAS ESTIMADAS (bought past month):**\n`;
+        result += `   - Mensuales: ${monthlySold.toLocaleString()}+ unidades\n`;
+        result += `   - Diarias: ~${(monthlySold / 30).toFixed(1)} unidades\n`;
       }
 
-      result += `\n🏆 **BUY BOX:**\n`;
-      let ganador = 'Sin Buy Box';
-      if (buyBoxIsAmazon) ganador = 'Amazon';
-      else if (buyBoxIsFBA) ganador = 'Vendedor 3P (FBA)';
-      else if (buyBoxPrice && buyBoxPrice > 0) ganador = 'Vendedor 3P (FBM)';
-      else if (buyBoxUsedPrice && buyBoxUsedPrice > 0) ganador = 'Vendedor 3P (Usado)';
-      result += `   - Ganador: ${ganador}\n`;
-      
-      if (buyBoxPrice && buyBoxPrice > 0) {
-        result += `   - Condición: Nuevo\n`;
-      } else if (buyBoxUsedPrice && buyBoxUsedPrice > 0) {
-        result += `   - Condición: ⚠️ USADO\n`;
+      // ========== OFFERS / COMPETITION ==========
+      if (product.offers && product.offers.length > 0) {
+        // Use liveOffersOrder for currently active offers
+        const liveIndexes = product.liveOffersOrder;
+        let liveOffers: any[];
+
+        if (liveIndexes && liveIndexes.length > 0) {
+          // Deduplicate indexes (Keepa puts duplicates for identical offers)
+          const uniqueIndexes = [...new Set(liveIndexes)] as number[];
+          liveOffers = uniqueIndexes.map((idx: number) => product.offers[idx]).filter(Boolean);
+        } else {
+          // Fallback: filter by lastSeen recency (within last 24h)
+          const oneDayAgo = Date.now() - 86400000;
+          liveOffers = product.offers.filter((o: any) => o.lastSeen && o.lastSeen > oneDayAgo);
+        }
+
+        const totalLive = liveOffers.length;
+        const amazonOffers = liveOffers.filter((o: any) => o.isAmazon).length;
+        const fbaOffers = liveOffers.filter((o: any) => o.isFBA && !o.isAmazon).length;
+        const fbmOffers = totalLive - amazonOffers - fbaOffers;
+
+        result += `\n🏪 **COMPETENCIA (${totalLive} ofertas vivas):**\n`;
+        result += `   - Amazon vende: ${amazonOffers > 0 ? `Sí (${amazonOffers} oferta${amazonOffers > 1 ? 's' : ''})` : 'No'}\n`;
+        result += `   - Vendedores FBA: ${fbaOffers}\n`;
+        result += `   - Vendedores FBM: ${fbmOffers}\n`;
+
+        // New/Used offer counts from csv
+        const countNew = kv(stats?.current?.[11]);
+        const countUsed = kv(stats?.current?.[12]);
+        if (countNew) result += `   - Total ofertas New (hist.): ${countNew}\n`;
+        if (countUsed) result += `   - Total ofertas Used (hist.): ${countUsed}\n`;
+
+        // Top 5 live offers detail
+        if (totalLive > 0) {
+          result += `\n   **Top ${Math.min(5, totalLive)} ofertas:**\n`;
+          liveOffers.slice(0, 5).forEach((offer: any, i: number) => {
+            // Get latest price from offerCSV (last value pair: [keepaTime, price, ...])
+            const offerCSV = offer.offerCSV;
+            const price = offerCSV && offerCSV.length >= 2 ? kv(offerCSV[offerCSV.length - 1]) : null;
+            const shipping = offer.shippingCSV && offer.shippingCSV.length >= 2
+              ? kv(offer.shippingCSV[offer.shippingCSV.length - 1])
+              : null;
+
+            const sellerType = offer.isAmazon ? 'Amazon' : offer.isFBA ? 'FBA' : 'FBM';
+            const condition = offer.conditionComment
+              ? offer.conditionComment.substring(0, 40)
+              : (offer.isUsed ? 'Usado' : 'Nuevo');
+
+            let line = `   ${i + 1}. [${sellerType}] ${condition}`;
+            if (price) {
+              line += ` — ${this.client.formatPrice(price, domain)}`;
+              if (shipping && shipping > 0) line += ` + ${this.client.formatPrice(shipping, domain)} envío`;
+            }
+            if (offer.isPrime) line += ' 🟢 Prime';
+            if (offer.sellerId) line += ` (${offer.sellerId.substring(0, 14)})`;
+            result += line + '\n';
+          });
+        }
+
+        // Offer data freshness
+        if (product.offersSuccessful !== undefined) {
+          result += `\n   _Datos de ofertas: ${product.offersSuccessful ? '✅ Actualizados' : '⚠️ No se pudieron actualizar, datos históricos'}_\n`;
+        }
+      } else {
+        result += `\n🏪 **COMPETENCIA**: No se encontraron ofertas activas\n`;
       }
-      if (buyBoxShippingCountry) result += `   - País envío: ${buyBoxShippingCountry}\n`;
 
-      if (salesRank) result += `\n📊 **Sales Rank**: #${salesRank.toLocaleString()}\n`;
-
-      result += `\n⭐ **RESEÑAS:**\n`;
-      if (rating) result += `   - Rating: ${rating.toFixed(1)}/5.0\n`;
-      result += `   - Total: ${reviewCount.toLocaleString()} reseñas\n`;
-
-      result += `\n🏪 **COMPETENCIA:**\n`;
-      result += `   - Total ofertas: ${offerCount}\n`;
-      result += `   - Ofertas FBA: ${fbaOffers}\n`;
-      result += `   - Ofertas FBM: ${fbmOffers}\n`;
-      result += `   - Amazon vende: ${amazonOffers > 0 ? 'Sí' : 'No'}\n`;
-
-      if (monthlySold > 0) {
-        result += `\n📈 **VELOCIDAD DE VENTAS (30 días):**\n`;
-        result += `   - Mensuales: ${monthlySold} unidades\n`;
-        result += `   - Diarias: ${(monthlySold / 30).toFixed(1)} unidades\n`;
-        result += `   - Semanales: ${(monthlySold / 4.3).toFixed(1)} unidades\n`;
+      // ========== FBA FEES ==========
+      const referralFee = product.referralFeePercentage;
+      const pickAndPackFee = product.fbaFees?.pickAndPackFee;
+      if (referralFee || pickAndPackFee) {
+        result += `\n💶 **COSTES AMAZON:**\n`;
+        if (referralFee) result += `   - Comisión referral: ${referralFee}%\n`;
+        if (pickAndPackFee) result += `   - Tarifa FBA (pick&pack): ${this.client.formatPrice(pickAndPackFee, domain)}\n`;
       }
 
-      result += `\n💶 **COSTES AMAZON:**\n`;
-      if (referralFee) result += `   - Comisión referral: ${referralFee}%\n`;
-      if (pickAndPackFee) result += `   - Tarifa FBA: ${this.client.formatPrice(pickAndPackFee, domain)}\n`;
-
+      // ========== VARIATIONS ==========
       if (params.variations && product.variations && product.variations.length > 0) {
         result += `\n🔄 **VARIACIONES**: ${product.variations.length} disponibles\n`;
+        product.variations.slice(0, 10).forEach((v: any) => {
+          result += `   - ${v.asin}${v.attributes ? ': ' + Object.values(v.attributes).join(', ') : ''}\n`;
+        });
+        if (product.variations.length > 10) {
+          result += `   ... y ${product.variations.length - 10} más\n`;
+        }
       }
+
+      // ========== ADDITIONAL DATA ==========
+      if (product.parentAsin) result += `\n🔗 **Parent ASIN**: ${product.parentAsin}\n`;
+      if (product.numberOfItems) result += `📦 **Unidades por pack**: ${product.numberOfItems}\n`;
+      if (product.packageWeight) result += `⚖️ **Peso**: ${product.packageWeight}g\n`;
+      if (product.ean) result += `🔢 **EAN**: ${product.ean}\n`;
 
       return result;
     } catch (error) {
