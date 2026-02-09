@@ -67,46 +67,35 @@ export interface KeepaOffer {
 }
 
 export interface KeepaStats {
-  // Arrays indexados por CsvType (int[])
-  current: number[];            // Precios/valores actuales
-  avg: number[];                // Media ponderada del intervalo stats=X
-  avg30: number[];              // Media 30 días (siempre disponible)
-  avg90: number[];              // Media 90 días
-  avg180: number[];             // Media 180 días
-  avg365: number[];             // Media 365 días
-  atIntervalStart: number[];    // Precio al inicio del intervalo
-
-  // Arrays 2D: [csvType][keepaTime, value] — CORREGIDO (antes era number[])
-  min: any[];
-  max: any[];
-  minInInterval: any[];
-  maxInInterval: any[];
-
-  // Out of Stock percentages (int[] indexados por CsvType)
-  outOfStockPercentageInInterval: number[];
-  outOfStockPercentage30: number[];
-  outOfStockPercentage90: number[];
-  outOfStockPercentage180: number[];
-  outOfStockPercentage365: number[];
-
-  // Sales rank drops (≈ ventas estimadas)
-  salesRankDrops30: number;
-  salesRankDrops90: number;
-  salesRankDrops180: number;
-  salesRankDrops365: number;
-
-  // General
-  totalOfferCount: number;
-  lightningDealInfo: number[] | null;
-  lastOffersUpdate: number;
-
-  // ── Buy Box fields (requiere offers O buybox) ──
+  current: number[];
+  avg: number[];
+  avg30: any;
+  avg90: any;
+  avg180: any;
+  avg365: any;
+  atIntervalStart: number[];
+  min: any;
+  max: any;
+  minInInterval: any;
+  maxInInterval: any;
+  outOfStockPercentageInInterval: any;
+  outOfStockPercentage30: any;
+  outOfStockPercentage90: any;
+  outOfStockPercentage180: any;
+  outOfStockPercentage365: any;
+  salesRankDrops30?: number;
+  salesRankDrops90?: number;
+  salesRankDrops180?: number;
+  salesRankDrops365?: number;
+  totalOfferCount?: number;
+  lightningDealInfo?: number[] | null;
+  lastOffersUpdate?: number;
   lastBuyBoxUpdate?: number;
   buyBoxSellerId?: string;
   buyBoxPrice?: number;
   buyBoxShipping?: number;
   buyBoxSavingBasis?: number;
-  buyBoxSavingBasisType?: string;    // "LIST_PRICE" | "WAS_PRICE"
+  buyBoxSavingBasisType?: string;
   buyBoxSavingPercentage?: number;
   buyBoxIsUnqualified?: boolean;
   buyBoxIsShippable?: boolean;
@@ -122,36 +111,22 @@ export interface KeepaStats {
   buyBoxIsPrimeExclusive?: boolean;
   buyBoxIsPrimeEligible?: boolean;
   buyBoxIsPrimePantry?: boolean;
-  buyBoxCondition?: number;          // 1=Nuevo, 2-5=Usado
-  buyBoxStats?: Record<string, {
-    avgNewOfferCount: number;
-    avgPrice: number;
-    isFBA: boolean;
-    lastSeen: number;
-    percentageWon: number;
-  }>;
-
-  // Used Buy Box
+  buyBoxCondition?: number;
+  buyBoxStats?: Record<string, any>;
   buyBoxUsedPrice?: number;
   buyBoxUsedShipping?: number;
   buyBoxUsedSellerId?: string;
   buyBoxUsedIsFBA?: boolean;
-  buyBoxUsedCondition?: number;      // 2=Like New, 3=Very Good, 4=Good, 5=Acceptable
+  buyBoxUsedCondition?: number;
   buyBoxUsedStats?: Record<string, any>;
-
-  // ── Campos que requieren offers ──
   retrievedOfferCount?: number;
   isAddonItem?: boolean;
   sellerIdsLowestFBA?: string[];
   sellerIdsLowestFBM?: string[];
   offerCountFBA?: number;
   offerCountFBM?: number;
-
-  // ── Campos que requieren stock=true ──
   stockAmazon?: number;
   stockBuyBox?: number;
-
-  // Legacy (mantener compatibilidad)
   salesRankReference?: number;
   salesRankReferenceDrop?: number;
   out?: number[];
@@ -159,7 +134,6 @@ export interface KeepaStats {
   couponHistory?: number[][];
   promotionHistory?: number[][];
 }
-
 export interface KeepaCategory {
   catId: number;
   name: string;
