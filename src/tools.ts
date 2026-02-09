@@ -46,10 +46,11 @@ export const BestSellersSchema = z.object({
 });
 
 export const PriceHistorySchema = z.object({
-  asin: z.string().describe('Amazon ASIN (product identifier)'),
-  domain: z.number().min(1).max(11).default(1).describe('Amazon domain (1=US, 2=UK, 3=DE, etc.)'),
-  dataType: z.number().min(0).max(30).describe('Data type (0=Amazon, 1=New, 2=Used, 3=Sales Rank, etc.)'),
-  days: z.number().min(1).max(365).default(30).describe('Number of days of history'),
+  asin: z.string().describe('Amazon ASIN'),
+  domain: z.number().min(1).max(11).default(9).describe('Amazon domain (9=ES)'),
+  days: z.number().min(1).max(365).default(90).describe('Days of history (1-365)'),
+  dataType: z.number().optional().describe('Specific CsvType index (0=Amazon, 1=New, 2=Used, 3=SalesRank, 18=BuyBox). If omitted, shows all relevant types.'),
+  includeOffers: z.boolean().default(false).describe('Include Buy Box history (costs 6+ extra tokens). Set true for BB winner history.'),
 });
 
 export const ProductFinderSchema = z.object({
@@ -703,94 +704,248 @@ export class KeepaTools {
 
   async getPriceHistory(params: z.infer<typeof PriceHistorySchema>): Promise<string> {
     try {
+      const queryOptions: any = {
+        days: params.days,
+        history: 1,           // IMPORTANTE: 1 no true (Keepa requiere 0/1)
+        stats: 90,            // FREE: min/max/avg para el resumen
+      };
+
+      // Solo añadir offers si se pide BB history (coste extra 6-12 tokens)
+      if (params.includeOffers) {
+        queryOptions.offers = 20;
+        queryOptions['only-live-offers'] = 1;
+      }
+
       const product = await this.client.getProductByAsin(
         params.asin,
         params.domain as KeepaDomain,
-        {
-          days: params.days,
-          history: true,
-        }
+        queryOptions
       );
 
-      if (!product || !product.csv) {
-        return `No price history found for ASIN: ${params.asin}`;
+      if (!product) {
+        return `Producto no encontrado: ${params.asin}`;
       }
 
-      const priceData = this.client.parseCSVData(product.csv, params.dataType);
-      
-      if (priceData.length === 0) {
-        return `No data available for the specified data type (${params.dataType})`;
+      if (!product.csv) {
+        return `No hay historial de precios para ASIN: ${params.asin}`;
       }
 
       const domain = params.domain as KeepaDomain;
-      const domainName = this.client.getDomainName(domain);
-      
-      const dataTypeNames: Record<number, string> = {
-        [KeepaDataType.AMAZON]: 'Amazon Price',
-        [KeepaDataType.NEW]: 'New Price',
-        [KeepaDataType.USED]: 'Used Price',
-        [KeepaDataType.SALES_RANK]: 'Sales Rank',
-        [KeepaDataType.RATING]: 'Rating',
-        [KeepaDataType.COUNT_REVIEWS]: 'Review Count',
-      };
+      const stats = product.stats as any;
 
-      const dataTypeName = dataTypeNames[params.dataType] || `Data Type ${params.dataType}`;
-      
-      let result = `**Price History for ${params.asin}**\n\n`;
-      result += `🏪 **Marketplace**: ${domainName}\n`;
-      result += `📊 **Data Type**: ${dataTypeName}\n`;
-      result += `📅 **Period**: Last ${params.days} days\n`;
-      result += `📈 **Data Points**: ${priceData.length}\n\n`;
+      // ── Header compacto (siempre) ──
+      const titleShort = product.title
+        ? (product.title.length > 60 ? product.title.substring(0, 57) + '...' : product.title)
+        : 'N/A';
+      const bbPrice = stats?.buyBoxPrice && stats.buyBoxPrice > 0
+        ? this.client.formatPrice(stats.buyBoxPrice, domain)
+        : 'N/A';
 
-      if (priceData.length > 0) {
-        const latest = priceData[priceData.length - 1];
-        const oldest = priceData[0];
-        
-        result += `**Latest Value**: `;
-        if (params.dataType <= 2 || params.dataType === 18) {
-          result += `${this.client.formatPrice(latest.value, domain)}\n`;
+      let result = `📦 **${params.asin}** — ${titleShort} | 🏷️ BB: ${bbPrice}\n`;
+      result += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n`;
+      result += `📅 **Periodo**: Últimos ${params.days} días\n\n`;
+
+      // ── Tipos de datos a mostrar ──
+      const csvTypeConfig: Array<{
+        index: number;
+        name: string;
+        emoji: string;
+        isPrice: boolean;
+        requiresOffers: boolean;
+      }> = [
+        { index: 0, name: 'Amazon', emoji: '🟠', isPrice: true, requiresOffers: false },
+        { index: 1, name: 'Marketplace (Nuevo)', emoji: '🟢', isPrice: true, requiresOffers: false },
+        { index: 2, name: 'Usado', emoji: '🔵', isPrice: true, requiresOffers: false },
+        { index: 3, name: 'Sales Rank', emoji: '📊', isPrice: false, requiresOffers: false },
+        { index: 18, name: 'Buy Box (con envío)', emoji: '🏆', isPrice: true, requiresOffers: true },
+      ];
+
+      // Si el usuario pidió un tipo específico, solo mostrar ese
+      const typesToShow = params.dataType !== undefined
+        ? csvTypeConfig.filter(t => t.index === params.dataType)
+        : csvTypeConfig.filter(t => !t.requiresOffers || params.includeOffers);
+
+      let anyDataShown = false;
+
+      for (const csvType of typesToShow) {
+        const rawData = this.client.parseCSVData(product.csv, csvType.index);
+
+        // Filtrar valores -1 (sin stock/oferta) para precios
+        const data = csvType.isPrice
+          ? rawData.filter(d => d.value > 0)
+          : rawData.filter(d => d.value >= 0);
+
+        if (data.length === 0) continue;
+        anyDataShown = true;
+
+        result += `${csvType.emoji} **${csvType.name}:**\n`;
+
+        // ── Estadísticas del periodo (desde stats object, FREE) ──
+        if (stats) {
+          const avg90 = stats.avg90?.[csvType.index];
+          const minRaw = stats.minInInterval?.[csvType.index];
+          const maxRaw = stats.maxInInterval?.[csvType.index];
+          const minVal = Array.isArray(minRaw) ? minRaw[1] : minRaw;
+          const maxVal = Array.isArray(maxRaw) ? maxRaw[1] : maxRaw;
+          const minTime = Array.isArray(minRaw) ? minRaw[0] : null;
+          const maxTime = Array.isArray(maxRaw) ? maxRaw[0] : null;
+
+          if (csvType.isPrice) {
+            const parts: string[] = [];
+            if (avg90 && avg90 > 0) parts.push(`Media: ${this.client.formatPrice(avg90, domain)}`);
+            if (minVal && minVal > 0) {
+              let minStr = `Mín: ${this.client.formatPrice(minVal, domain)}`;
+              if (minTime) minStr += ` (${this.formatKeepaDate(minTime)})`;
+              parts.push(minStr);
+            }
+            if (maxVal && maxVal > 0) {
+              let maxStr = `Máx: ${this.client.formatPrice(maxVal, domain)}`;
+              if (maxTime) maxStr += ` (${this.formatKeepaDate(maxTime)})`;
+              parts.push(maxStr);
+            }
+            if (parts.length > 0) {
+              result += `   📐 ${parts.join(' | ')}\n`;
+            }
+          } else if (csvType.index === 3) {
+            // Sales Rank stats
+            const parts: string[] = [];
+            if (avg90 && avg90 > 0) parts.push(`Media: #${avg90.toLocaleString()}`);
+            if (minVal && minVal > 0) parts.push(`Mejor: #${minVal.toLocaleString()}`);
+            if (maxVal && maxVal > 0) parts.push(`Peor: #${maxVal.toLocaleString()}`);
+            if (parts.length > 0) {
+              result += `   📐 ${parts.join(' | ')}\n`;
+            }
+          }
+        }
+
+        // ── Tendencia ──
+        if (data.length >= 2) {
+          const first = data[0].value;
+          const last = data[data.length - 1].value;
+          if (first > 0 && last > 0) {
+            const change = ((last - first) / first) * 100;
+            let trend = '→ Estable';
+            if (change > 3) trend = `📈 Subida +${change.toFixed(1)}%`;
+            else if (change < -3) trend = `📉 Bajada ${change.toFixed(1)}%`;
+            result += `   🔄 Tendencia: ${trend} (${this.formatValue(first, csvType.isPrice, domain)} → ${this.formatValue(last, csvType.isPrice, domain)})\n`;
+          }
+        }
+
+        // ── Historial de puntos ──
+        if (data.length <= 15) {
+          // Pocos puntos → mostrar todos
+          result += `   📋 Historial (${data.length} cambios):\n`;
+          for (const point of data) {
+            const date = new Date(point.timestamp).toLocaleDateString('es-ES', {
+              day: '2-digit', month: 'short', year: 'numeric'
+            });
+            result += `      ${date}: ${this.formatValue(point.value, csvType.isPrice, domain)}\n`;
+          }
         } else {
-          result += `${latest.value.toLocaleString()}\n`;
-        }
-        
-        result += `**Date**: ${new Date(latest.timestamp).toLocaleDateString()}\n\n`;
-        
-        if (params.dataType <= 2 || params.dataType === 18) {
-          const prices = priceData.map(d => d.value).filter(v => v > 0);
-          if (prices.length > 0) {
-            const min = Math.min(...prices);
-            const max = Math.max(...prices);
-            const avg = prices.reduce((sum, price) => sum + price, 0) / prices.length;
-            
-            result += `**Price Statistics**:\n`;
-            result += `• Minimum: ${this.client.formatPrice(min, domain)}\n`;
-            result += `• Maximum: ${this.client.formatPrice(max, domain)}\n`;
-            result += `• Average: ${this.client.formatPrice(Math.round(avg), domain)}\n\n`;
+          // Muchos puntos → resumen mensual + últimos 5 cambios recientes
+          result += `   📋 Resumen mensual (${data.length} cambios totales):\n`;
+          const monthly = this.aggregateMonthly(data, csvType.isPrice, domain);
+          for (const month of monthly) {
+            result += `      ${month}\n`;
+          }
+          result += `   📋 Últimos cambios:\n`;
+          const recent = data.slice(-5);
+          for (const point of recent) {
+            const date = new Date(point.timestamp).toLocaleDateString('es-ES', {
+              day: '2-digit', month: 'short', year: 'numeric'
+            });
+            result += `      ${date}: ${this.formatValue(point.value, csvType.isPrice, domain)}\n`;
           }
         }
 
-        result += `**Recent History** (last 10 data points):\n`;
-        const recentData = priceData.slice(-10);
-        recentData.forEach((point, i) => {
-          const date = new Date(point.timestamp).toLocaleDateString();
-          let value: string;
-          
-          if (params.dataType <= 2 || params.dataType === 18) {
-            value = this.client.formatPrice(point.value, domain);
-          } else {
-            value = point.value.toLocaleString();
-          }
-          
-          result += `${recentData.length - i}. ${date}: ${value}\n`;
-        });
+        result += `\n`;
+      }
+
+      if (!anyDataShown) {
+        result += `⚠️ No hay datos de historial disponibles para el periodo solicitado.\n`;
+      }
+
+      // ── OOS % (contexto útil para el historial) ──
+      if (stats) {
+        const oosAmazon = stats.outOfStockPercentage90?.[0];
+        const oosNew = stats.outOfStockPercentage90?.[1];
+        if ((oosAmazon !== undefined && oosAmazon > 0) || (oosNew !== undefined && oosNew > 0)) {
+          result += `📉 **OUT OF STOCK (90d):**`;
+          if (oosAmazon > 0) result += ` Amazon: ${oosAmazon}%`;
+          if (oosNew > 0) result += ` | Marketplace: ${oosNew}%`;
+          result += `\n`;
+        }
       }
 
       return result;
     } catch (error) {
-      return `Error getting price history: ${error instanceof Error ? error.message : 'Unknown error'}`;
+      return `Error obteniendo historial: ${error instanceof Error ? error.message : String(error)}`;
     }
   }
 
+  // ── Helpers para getPriceHistory ──
+
+  private formatKeepaDate(keepaTime: number): string {
+    const unixMs = (keepaTime + 21564000) * 60000;
+    return new Date(unixMs).toLocaleDateString('es-ES', {
+      day: '2-digit', month: 'short'
+    });
+  }
+
+  private formatValue(value: number, isPrice: boolean, domain: KeepaDomain): string {
+    if (isPrice) {
+      return this.client.formatPrice(value, domain);
+    }
+    return `#${value.toLocaleString()}`;
+  }
+
+  private aggregateMonthly(
+    data: Array<{ timestamp: number; value: number }>,
+    isPrice: boolean,
+    domain: KeepaDomain
+  ): string[] {
+    const months: Record<string, number[]> = {};
+
+    for (const point of data) {
+      const d = new Date(point.timestamp);
+      const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+      if (!months[key]) months[key] = [];
+      months[key].push(point.value);
+    }
+
+    const result: string[] = [];
+    for (const [key, values] of Object.entries(months).sort()) {
+      const [year, month] = key.split('-');
+      const monthNames = ['Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic'];
+      const monthName = monthNames[parseInt(month) - 1];
+      const positiveValues = values.filter(v => v > 0);
+
+      if (positiveValues.length === 0) {
+        result.push(`${monthName} ${year}: Sin datos`);
+        continue;
+      }
+
+      const min = Math.min(...positiveValues);
+      const max = Math.max(...positiveValues);
+      const avg = Math.round(positiveValues.reduce((s, v) => s + v, 0) / positiveValues.length);
+
+      if (isPrice) {
+        if (min === max) {
+          result.push(`${monthName} ${year}: ${this.client.formatPrice(avg, domain)} (${positiveValues.length} cambios)`);
+        } else {
+          result.push(`${monthName} ${year}: ${this.client.formatPrice(min, domain)} — ${this.client.formatPrice(max, domain)} (media: ${this.client.formatPrice(avg, domain)}, ${positiveValues.length} cambios)`);
+        }
+      } else {
+        if (min === max) {
+          result.push(`${monthName} ${year}: #${avg.toLocaleString()} (${positiveValues.length} cambios)`);
+        } else {
+          result.push(`${monthName} ${year}: #${min.toLocaleString()} — #${max.toLocaleString()} (${positiveValues.length} cambios)`);
+        }
+      }
+    }
+
+    return result;
+  }
   async findProducts(params: z.infer<typeof ProductFinderSchema>): Promise<string> {
     try {
       const domain = params.domain as KeepaDomain;
