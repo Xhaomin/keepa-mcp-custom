@@ -34,9 +34,9 @@ export const DealSearchSchema = z.object({
 });
 
 export const SellerLookupSchema = z.object({
-  seller: z.string().describe('Seller ID or name'),
-  domain: z.number().min(1).max(11).default(1).describe('Amazon domain (1=US, 2=UK, 3=DE, etc.)'),
-  storefront: z.number().min(0).max(100000).optional().describe('Number of storefront ASINs to retrieve'),
+  seller: z.string().describe('Seller ID (ej: A3P5ROKL5A1OLE). Para batch: IDs separados por comas (máx 100). NO usar con storefront.'),
+  domain: z.number().min(1).max(11).default(9).describe('Amazon domain (1=US, 2=UK, 3=DE, 4=FR, 5=JP, 6=CA, 8=IT, 9=ES, 10=IN, 11=MX)'),
+  storefront: z.boolean().default(false).describe('Incluir lista de ASINs del vendedor (+9 tokens). Solo para consultas individuales, NO batch.'),
 });
 
 export const BestSellersSchema = z.object({
@@ -607,57 +607,274 @@ export class KeepaTools {
     }
   }
 
-  async lookupSeller(params: z.infer<typeof SellerLookupSchema>): Promise<string> {
+ async lookupSeller(params: z.infer<typeof SellerLookupSchema>): Promise<string> {
     try {
+      // Validate: storefront + batch = API error
+      const sellerIds = params.seller.split(',').map(s => s.trim()).filter(s => s.length > 0);
+      if (params.storefront && sellerIds.length > 1) {
+        return 'Error: No se puede usar storefront con batch de sellers. Consulta un seller individual para ver su storefront.';
+      }
+
       const sellers = await this.client.getSeller({
         seller: params.seller,
         domain: params.domain,
-        storefront: params.storefront,
+        storefront: params.storefront ? 1 : undefined,
       });
 
       if (sellers.length === 0) {
-        return `Seller not found: ${params.seller}`;
+        const notFoundIds = sellerIds.join(', ');
+        return `Vendedor(es) no encontrado(s): ${notFoundIds}`;
       }
 
-      const seller = sellers[0];
       const domain = params.domain as KeepaDomain;
-      const domainName = this.client.getDomainName(domain);
-      
-      let result = `**Seller Information**\n\n`;
-      result += `🏪 **Marketplace**: ${domainName}\n`;
-      result += `🏷️ **Seller ID**: ${seller.sellerId}\n`;
-      result += `📛 **Name**: ${seller.sellerName}\n`;
-      result += `⭐ **Rating**: ${seller.avgRating ? `${seller.avgRating}/5.0` : 'N/A'}\n`;
-      result += `📊 **Rating Count**: ${seller.ratingCount?.toLocaleString() || 'N/A'}\n`;
-      result += `🚩 **Scammer Status**: ${seller.isScammer ? '⚠️ Flagged as scammer' : '✅ Clean'}\n`;
-      result += `📦 **Amazon Seller**: ${seller.isAmazon ? 'Yes' : 'No'}\n`;
-      result += `🚚 **FBA Available**: ${seller.hasFBA ? 'Yes' : 'No'}\n`;
-      result += `📮 **FBM Available**: ${seller.hasFBM ? 'Yes' : 'No'}\n`;
-      
-      if (seller.totalStorefrontAsins) {
-        result += `🏪 **Total Products**: ${seller.totalStorefrontAsins.toLocaleString()}\n`;
-      }
-      
-      if (seller.startDate) {
-        const startDate = new Date(this.client.keepaTimeToUnixTime(seller.startDate));
-        result += `📅 **Started Selling**: ${startDate.toLocaleDateString()}\n`;
-      }
+      const isBatch = sellers.length > 1;
 
-      if (seller.storefront && seller.storefront.length > 0) {
-        result += `\n**Sample Storefront Products**: ${Math.min(5, seller.storefront.length)} shown\n`;
-        seller.storefront.slice(0, 5).forEach((asin, i) => {
-          result += `${i + 1}. ${asin}\n`;
-        });
-        
-        if (seller.storefront.length > 5) {
-          result += `... and ${seller.storefront.length - 5} more\n`;
-        }
+      if (isBatch) {
+        return this.formatSellerBatch(sellers, domain);
+      } else {
+        return this.formatSellerDetailed(sellers[0], domain, params.storefront);
       }
-
-      return result;
     } catch (error) {
-      return `Error looking up seller: ${error instanceof Error ? error.message : 'Unknown error'}`;
+      return `Error consultando vendedor: ${error instanceof Error ? error.message : 'Error desconocido'}`;
     }
+  }
+
+  // ── Helper: Detailed format (single seller) ──
+  private formatSellerDetailed(seller: any, domain: KeepaDomain, includeStorefront: boolean): string {
+    const domainName = this.client.getDomainName(domain);
+    let result = '';
+
+    // ── Header ──
+    result += `🏪 INFORMACIÓN DEL VENDEDOR\n`;
+    result += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
+
+    // ── Identity ──
+    result += `📛 Nombre: ${seller.sellerName || 'N/A'}\n`;
+    result += `🔑 ID: ${seller.sellerId}\n`;
+    result += `🌍 Marketplace: ${domainName}\n`;
+
+    if (seller.businessName) {
+      result += `🏢 Empresa: ${seller.businessName}`;
+      if (seller.vatID) result += ` | NIF/VAT: ${seller.vatID}`;
+      result += `\n`;
+    }
+    if (seller.address && Array.isArray(seller.address) && seller.address.length > 0) {
+      result += `📍 Dirección: ${seller.address.join(', ')}\n`;
+    }
+    if (seller.phoneNumber) result += `📞 Teléfono: ${seller.phoneNumber}\n`;
+    if (seller.email) result += `📧 Email: ${seller.email}\n`;
+    if (seller.businessType) result += `🏷️ Tipo: ${seller.businessType}\n`;
+    if (seller.representative) result += `👤 Representante: ${seller.representative}\n`;
+    if (seller.tradeNumber) result += `📋 Registro mercantil: ${seller.tradeNumber}\n`;
+
+    // ── Tracking since ──
+    if (seller.trackingSince) {
+      const sinceDate = new Date((seller.trackingSince + 21564000) * 60000);
+      const totalMonths = Math.floor((Date.now() - sinceDate.getTime()) / (1000 * 60 * 60 * 24 * 30));
+      const years = Math.floor(totalMonths / 12);
+      const months = totalMonths % 12;
+      const timeStr = years > 0 ? `${years}a ${months}m` : `${months}m`;
+      result += `📅 En Amazon desde: ${sinceDate.toLocaleDateString('es-ES', { month: 'short', year: 'numeric' })} (${timeStr})\n`;
+    }
+
+    // ── Rating ──
+    result += `\n⭐ REPUTACIÓN:\n`;
+    const currentRating = this.extractLastCsvValue(seller.csv, 0);
+    const currentRatingCount = this.extractLastCsvValue(seller.csv, 1);
+
+    if (currentRating !== null && currentRatingCount !== null) {
+      result += `   Rating: ${currentRating}% positivo (${currentRatingCount.toLocaleString()} valoraciones)\n`;
+    } else if (currentRating !== null) {
+      result += `   Rating: ${currentRating}% positivo\n`;
+    } else {
+      result += `   Rating: Sin datos\n`;
+    }
+
+    // Positive/Negative/Neutral
+    const posCount = this.extractLastHistoricalValue(seller.positiveRating);
+    const negCount = this.extractLastHistoricalValue(seller.negativeRating);
+    const neuCount = this.extractLastHistoricalValue(seller.neutralRating);
+    if (posCount !== null || negCount !== null) {
+      result += `   📊 Positivas: ${posCount ?? '?'} | Neutras: ${neuCount ?? '?'} | Negativas: ${negCount ?? '?'}\n`;
+    }
+
+    result += `   📦 FBA: ${seller.hasFBA ? 'Sí' : 'No'}\n`;
+
+    // Recent feedback (max 3)
+    if (seller.recentFeedback && Array.isArray(seller.recentFeedback) && seller.recentFeedback.length > 0) {
+      const feedbacks = seller.recentFeedback.slice(0, 3);
+      result += `   💬 Feedback reciente:\n`;
+      feedbacks.forEach((fb: any) => {
+        const stars = fb.rating ? '⭐'.repeat(Math.round(fb.rating / 10)) : '';
+        const fbDate = new Date((fb.date + 21564000) * 60000);
+        const daysAgo = Math.floor((Date.now() - fbDate.getTime()) / (1000 * 60 * 60 * 24));
+        const timeAgo = daysAgo === 0 ? 'hoy' : daysAgo === 1 ? 'ayer' : `hace ${daysAgo}d`;
+        const text = fb.feedback
+          ? (fb.feedback.length > 60 ? fb.feedback.substring(0, 57) + '...' : fb.feedback)
+          : '';
+        const striked = fb.isStriked ? ' [ELIMINADO]' : '';
+        result += `      ${stars} "${text}" (${timeAgo})${striked}\n`;
+      });
+    }
+
+    // ── Buy Box ──
+    result += `\n🏆 BUY BOX:\n`;
+    let hasBBData = false;
+    if (seller.buyBoxNewOwnershipRate !== undefined && seller.buyBoxNewOwnershipRate !== null) {
+      result += `   📈 Tasa BB ganado (nuevo): ${seller.buyBoxNewOwnershipRate}%\n`;
+      hasBBData = true;
+    }
+    if (seller.buyBoxUsedOwnershipRate !== undefined && seller.buyBoxUsedOwnershipRate !== null) {
+      result += `   📈 Tasa BB ganado (usado): ${seller.buyBoxUsedOwnershipRate}%\n`;
+      hasBBData = true;
+    }
+    if (seller.avgBuyBoxCompetitors !== undefined && seller.avgBuyBoxCompetitors !== null) {
+      result += `   👥 Competidores medios por BB: ${seller.avgBuyBoxCompetitors.toFixed(1)} sellers\n`;
+      hasBBData = true;
+    }
+    if (!hasBBData) {
+      result += `   Sin datos de Buy Box\n`;
+    }
+
+    // ── Portfolio ──
+    result += `\n📦 PORTFOLIO:\n`;
+
+    // Total products
+    if (seller.totalStorefrontAsins && Array.isArray(seller.totalStorefrontAsins) && seller.totalStorefrontAsins.length >= 2) {
+      const count = seller.totalStorefrontAsins[1];
+      const updateTime = new Date((seller.totalStorefrontAsins[0] + 21564000) * 60000);
+      const daysAgo = Math.floor((Date.now() - updateTime.getTime()) / (1000 * 60 * 60 * 24));
+      result += `   🔢 Total productos: ${count.toLocaleString()} (actualizado hace ${daysAgo}d)\n`;
+    }
+
+    // Brand stats (top 5)
+    if (seller.sellerBrandStatistics && Array.isArray(seller.sellerBrandStatistics) && seller.sellerBrandStatistics.length > 0) {
+      const brands = seller.sellerBrandStatistics.slice(0, 5);
+      const brandStrs = brands.map((b: any) => {
+        const amzWarn = b.productCountWithAmazonOffer > 0 ? ` ⚠️${b.productCountWithAmazonOffer} con Amazon` : '';
+        return `${b.brand} (${b.productCount} prod, rank medio #${b.avg30SalesRank?.toLocaleString() || '?'}${amzWarn})`;
+      });
+      result += `   🏷️ Marcas: ${brandStrs.join(' | ')}\n`;
+    }
+
+    // Category stats (top 5)
+    if (seller.sellerCategoryStatistics && Array.isArray(seller.sellerCategoryStatistics) && seller.sellerCategoryStatistics.length > 0) {
+      const cats = seller.sellerCategoryStatistics.slice(0, 5);
+      const catStrs = cats.map((c: any) => {
+        const amzWarn = c.productCountWithAmazonOffer > 0 ? ` ⚠️${c.productCountWithAmazonOffer} con Amazon` : '';
+        return `Cat.${c.catId} (${c.productCount} prod, rank medio #${c.avg30SalesRank?.toLocaleString() || '?'}${amzWarn})`;
+      });
+      result += `   📂 Categorías: ${catStrs.join(' | ')}\n`;
+    }
+
+    // ── Competitors ──
+    if (seller.competitors && Array.isArray(seller.competitors) && seller.competitors.length > 0) {
+      result += `\n🎯 TOP COMPETIDORES (sellers que venden los mismos productos):\n`;
+      seller.competitors.slice(0, 5).forEach((comp: any, i: number) => {
+        result += `   ${i + 1}. ${comp.sellerId} — ${comp.percent}% productos en común\n`;
+      });
+      result += `   💡 Usa "info seller <ID>" para ver detalles de un competidor\n`;
+    }
+
+    // ── Storefront (optional) ──
+    if (includeStorefront && seller.asinList && Array.isArray(seller.asinList) && seller.asinList.length > 0) {
+      const showCount = Math.min(15, seller.asinList.length);
+      result += `\n🏪 STOREFRONT (${showCount} de ${seller.asinList.length} ASINs):\n`;
+      for (let i = 0; i < showCount; i++) {
+        const asin = seller.asinList[i];
+        let timeStr = '';
+        if (seller.asinListLastSeen && seller.asinListLastSeen[i]) {
+          const lastSeen = new Date((seller.asinListLastSeen[i] + 21564000) * 60000);
+          const daysAgo = Math.floor((Date.now() - lastSeen.getTime()) / (1000 * 60 * 60 * 24));
+          timeStr = ` (visto hace ${daysAgo}d)`;
+        }
+        result += `   ${i + 1}. ${asin}${timeStr}\n`;
+      }
+      if (seller.asinList.length > showCount) {
+        result += `   ... y ${(seller.asinList.length - showCount).toLocaleString()} más\n`;
+      }
+    }
+
+    return result;
+  }
+
+  // ── Helper: Compact batch format (multiple sellers) ──
+  private formatSellerBatch(sellers: any[], domain: KeepaDomain): string {
+    const domainName = this.client.getDomainName(domain);
+    let result = `🏪 INFORMACIÓN DE ${sellers.length} VENDEDORES (${domainName})\n`;
+    result += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n`;
+
+    sellers.forEach((seller: any, i: number) => {
+      // Rating from csv
+      const currentRating = this.extractLastCsvValue(seller.csv, 0);
+      const currentRatingCount = this.extractLastCsvValue(seller.csv, 1);
+      const ratingStr = currentRating !== null
+        ? `${currentRating}%${currentRatingCount ? ` (${currentRatingCount.toLocaleString()} val.)` : ''}`
+        : 'Sin datos';
+
+      // Products count
+      let productsStr = '?';
+      if (seller.totalStorefrontAsins && Array.isArray(seller.totalStorefrontAsins) && seller.totalStorefrontAsins.length >= 2) {
+        productsStr = seller.totalStorefrontAsins[1].toLocaleString();
+      }
+
+      // Buy Box rate
+      const bbRate = seller.buyBoxNewOwnershipRate !== undefined && seller.buyBoxNewOwnershipRate !== null
+        ? `${seller.buyBoxNewOwnershipRate}%` : '?';
+      const bbCompetitors = seller.avgBuyBoxCompetitors !== undefined && seller.avgBuyBoxCompetitors !== null
+        ? seller.avgBuyBoxCompetitors.toFixed(1) : '?';
+
+      // FBA
+      const fba = seller.hasFBA ? 'FBA' : 'FBM';
+
+      // Time in Amazon
+      let sinceStr = '?';
+      if (seller.trackingSince) {
+        const sinceDate = new Date((seller.trackingSince + 21564000) * 60000);
+        sinceStr = sinceDate.toLocaleDateString('es-ES', { month: 'short', year: 'numeric' });
+      }
+
+      // Business info
+      const business = seller.businessName ? ` (${seller.businessName})` : '';
+      const country = seller.address && Array.isArray(seller.address) && seller.address.length > 0
+        ? ` 📍${seller.address[seller.address.length - 1]}`
+        : '';
+
+      result += `${i + 1}. 📛 ${seller.sellerName || 'N/A'}${business}${country}\n`;
+      result += `   🔑 ${seller.sellerId} | ${fba} | Desde: ${sinceStr}\n`;
+      result += `   ⭐ ${ratingStr} | 🏆 BB: ${bbRate} (${bbCompetitors} compet.) | 📦 ${productsStr} prod.\n`;
+
+      // Top brands (compact)
+      if (seller.sellerBrandStatistics && Array.isArray(seller.sellerBrandStatistics) && seller.sellerBrandStatistics.length > 0) {
+        const brands = seller.sellerBrandStatistics.slice(0, 3).map((b: any) => `${b.brand}(${b.productCount})`);
+        result += `   🏷️ Marcas: ${brands.join(', ')}\n`;
+      }
+
+      result += `\n`;
+    });
+
+    result += `💡 Para detalles completos de un vendedor: "info seller <ID>"\n`;
+
+    return result;
+  }
+
+  // ── Helper: Extract last value from seller csv[index] ──
+  // csv[0] = rating% history [keepaTime, value, keepaTime, value, ...]
+  // csv[1] = ratingCount history [keepaTime, value, keepaTime, value, ...]
+  private extractLastCsvValue(csv: any, index: number): number | null {
+    if (!csv || !Array.isArray(csv) || !csv[index] || !Array.isArray(csv[index]) || csv[index].length < 2) {
+      return null;
+    }
+    return csv[index][csv[index].length - 1];
+  }
+
+  // ── Helper: Extract last value from historical arrays ──
+  // Format: [keepaTime, value, keepaTime, value, ...]
+  private extractLastHistoricalValue(arr: any): number | null {
+    if (!arr || !Array.isArray(arr) || arr.length < 2) {
+      return null;
+    }
+    return arr[arr.length - 1];
   }
 
   async getBestSellers(params: z.infer<typeof BestSellersSchema>): Promise<string> {
