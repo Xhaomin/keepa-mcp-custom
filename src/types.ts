@@ -67,25 +67,95 @@ export interface KeepaOffer {
 }
 
 export interface KeepaStats {
-  current: number[];
-  avg: number[];
-  atIntervalStart: number[];
-  min: number[];
-  max: number[];
-  minInInterval: number[];
-  maxInInterval: number[];
-  out: number[];
-  total: number[];
-  retrievedOfferCount: number;
+  // Arrays indexados por CsvType (int[])
+  current: number[];            // Precios/valores actuales
+  avg: number[];                // Media ponderada del intervalo stats=X
+  avg30: number[];              // Media 30 días (siempre disponible)
+  avg90: number[];              // Media 90 días
+  avg180: number[];             // Media 180 días
+  avg365: number[];             // Media 365 días
+  atIntervalStart: number[];    // Precio al inicio del intervalo
+
+  // Arrays 2D: [csvType][keepaTime, value] — CORREGIDO (antes era number[])
+  min: (number[] | null)[];          // Mínimo absoluto registrado
+  max: (number[] | null)[];          // Máximo absoluto registrado
+  minInInterval: (number[] | null)[]; // Mínimo dentro del intervalo stats
+  maxInInterval: (number[] | null)[]; // Máximo dentro del intervalo stats
+
+  // Out of Stock percentages (int[] indexados por CsvType)
+  outOfStockPercentageInInterval: number[];
+  outOfStockPercentage30: number[];
+  outOfStockPercentage90: number[];
+  outOfStockPercentage180: number[];
+  outOfStockPercentage365: number[];
+
+  // Sales rank drops (≈ ventas estimadas)
+  salesRankDrops30: number;
+  salesRankDrops90: number;
+  salesRankDrops180: number;
+  salesRankDrops365: number;
+
+  // General
+  totalOfferCount: number;
+  lightningDealInfo: number[] | null;
+  lastOffersUpdate: number;
+
+  // ── Buy Box fields (requiere offers O buybox) ──
+  lastBuyBoxUpdate?: number;
+  buyBoxSellerId?: string;
   buyBoxPrice?: number;
   buyBoxShipping?: number;
+  buyBoxSavingBasis?: number;
+  buyBoxSavingBasisType?: string;    // "LIST_PRICE" | "WAS_PRICE"
+  buyBoxSavingPercentage?: number;
+  buyBoxIsUnqualified?: boolean;
+  buyBoxIsShippable?: boolean;
+  buyBoxIsPreorder?: boolean;
+  buyBoxIsBackorder?: boolean;
+  buyBoxIsFBA?: boolean;
+  buyBoxIsAmazon?: boolean;
+  buyBoxIsMAP?: boolean;
+  buyBoxMinOrderQuantity?: number;
+  buyBoxMaxOrderQuantity?: number;
+  buyBoxAvailabilityMessage?: string;
+  buyBoxShippingCountry?: string;
+  buyBoxIsPrimeExclusive?: boolean;
+  buyBoxIsPrimeEligible?: boolean;
+  buyBoxIsPrimePantry?: boolean;
+  buyBoxCondition?: number;          // 1=Nuevo, 2-5=Usado
+  buyBoxStats?: Record<string, {
+    avgNewOfferCount: number;
+    avgPrice: number;
+    isFBA: boolean;
+    lastSeen: number;
+    percentageWon: number;
+  }>;
+
+  // Used Buy Box
   buyBoxUsedPrice?: number;
   buyBoxUsedShipping?: number;
+  buyBoxUsedSellerId?: string;
+  buyBoxUsedIsFBA?: boolean;
+  buyBoxUsedCondition?: number;      // 2=Like New, 3=Very Good, 4=Good, 5=Acceptable
+  buyBoxUsedStats?: Record<string, any>;
+
+  // ── Campos que requieren offers ──
+  retrievedOfferCount?: number;
+  isAddonItem?: boolean;
+  sellerIdsLowestFBA?: string[];
+  sellerIdsLowestFBM?: string[];
+  offerCountFBA?: number;
+  offerCountFBM?: number;
+
+  // ── Campos que requieren stock=true ──
+  stockAmazon?: number;
+  stockBuyBox?: number;
+
+  // Legacy (mantener compatibilidad)
   salesRankReference?: number;
   salesRankReferenceDrop?: number;
-  outOfStockPercentage30?: number;
-  outOfStockPercentage90?: number;
-  lightningDealInfo?: number[];
+  out?: number[];
+  total?: number[];
   couponHistory?: number[][];
   promotionHistory?: number[][];
 }
@@ -192,6 +262,7 @@ export interface ProductQueryParams {
   coupon_history?: boolean;
   lightning_deals?: boolean;
   stats?: number; // Statistics data (1 = enable, provides FREE sales velocity and inventory analytics)
+  'only-live-offers'?: boolean;  // FREE: solo ofertas actuales (reduce respuesta)
 }
 
 export interface DealQueryParams {
