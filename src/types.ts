@@ -77,10 +77,10 @@ export interface KeepaStats {
   atIntervalStart: number[];    // Precio al inicio del intervalo
 
   // Arrays 2D: [csvType][keepaTime, value] — CORREGIDO (antes era number[])
-  min: (number[] | null)[];          // Mínimo absoluto registrado
-  max: (number[] | null)[];          // Máximo absoluto registrado
-  minInInterval: (number[] | null)[]; // Mínimo dentro del intervalo stats
-  maxInInterval: (number[] | null)[]; // Máximo dentro del intervalo stats
+  min: any[];
+  max: any[];
+  minInInterval: any[];
+  maxInInterval: any[];
 
   // Out of Stock percentages (int[] indexados por CsvType)
   outOfStockPercentageInInterval: number[];
