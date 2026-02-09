@@ -119,33 +119,48 @@ export const TokenStatusSchema = z.object({});
 export class KeepaTools {
   constructor(private client: KeepaClient) {}
 
-async lookupProduct(params: z.infer<typeof ProductLookupSchema>): Promise<string> {
+// ============================================================
+// lookupProduct() v5 — REEMPLAZAR COMPLETO en src/tools.ts
+// Basado en documentación oficial de Keepa:
+// - Statistics Object: min/max son int[][] (arrays 2D)
+// - stock=true → stats.stockBuyBox (simple int)
+// - buybox ignorado con offers
+// - rating redundante con offers
+// - only-live-offers reduce respuesta sin coste
+// ============================================================
+
+  async lookupProduct(params: z.infer<typeof ProductLookupSchema>): Promise<string> {
     try {
       if (!params.asin && !params.code) {
-        return 'Error: Se requiere ASIN o código EAN/UPC';
+        return 'Error: Either ASIN or code (EAN/UPC) is required';
       }
 
-      const queryParams = {
-        domain: params.domain,
-        stats: 90,              // FREE: avg/min/max sobre 90 días
-        days: params.days || 90,
-        history: true,
-        offers: params.offers || 20,
+      // ── Parámetros optimizados según documentación Keepa ──
+      const queryOptions: any = {
+        stats: 90,                // FREE: avg/min/max/OOS sobre 90 días
+        days: params.days || 1,   // Solo datos recientes para offers (reduce respuesta)
+        history: false,           // No parseamos csv[] aquí → reduce respuesta ~80%
+        offers: params.offers || 20, // 6-12 tokens: ofertas, BB, rating, reviews actualizados
+        stock: true,              // 2 tokens: stats.stockBuyBox + stats.stockAmazon
+        'only-live-offers': true, // FREE: excluye ofertas históricas → reduce respuesta
+        // rating: ELIMINADO — redundante cuando se usa offers (doc: "use offers for up-to-date data")
+        // buybox: ELIMINADO — ignorado cuando se usa offers (doc: "buybox parameter is ignored")
         variations: params.variations,
-        rating: true,
-        buybox: true,
-        stock: true,               // 2 tokens extra: stockCSV en offers
       };
 
       let product;
       if (params.code) {
-        const products = await this.client.getProduct({ code: params.code, ...queryParams });
-        product = products?.[0] || null;
+        const products = await this.client.getProduct({
+          code: params.code,
+          domain: params.domain as KeepaDomain,
+          ...queryOptions,
+        });
+        product = products?.[0];
       } else {
         product = await this.client.getProductByAsin(
           params.asin!,
           params.domain as KeepaDomain,
-          queryParams,
+          queryOptions
         );
       }
 
@@ -161,165 +176,321 @@ async lookupProduct(params: z.infer<typeof ProductLookupSchema>): Promise<string
         ? `https://m.media-amazon.com/images/I/${product.imagesCSV.split(',')[0]}`
         : null;
 
+      const stats = product.stats as any; // Cast para acceder a campos completos
+
+      // ── Información Básica ──
       let result = `**Product Information for ${asin}**\n\n`;
       result += `🏪 **Marketplace**: ${domainName}\n`;
       result += `📦 **ASIN**: ${asin}\n`;
       if (imageUrl) result += `📷 **Imagen**: ${imageUrl}\n`;
       result += `🏷️ **Titulo**: ${product.title || 'N/A'}\n`;
       result += `🏢 **Marca**: ${product.brand || 'N/A'}\n`;
-      result += `📊 **Categoria**: ${product.productGroup || 'N/A'}\n\n`;
-
-      const buyBoxPrice = product.stats?.buyBoxPrice;
-      const buyBoxUsedPrice = (product.stats as any)?.buyBoxUsedPrice;
-      const currentAmazon = product.stats?.current?.[0];
-      const avgPrice = product.stats?.avg?.[0];
-      const minPrice = product.stats?.min?.[0];
-      const maxPrice = product.stats?.max?.[0];
-      const salesRank = product.stats?.current?.[3];
-      const monthlySold = (product as any).monthlySold || (product.stats as any)?.monthlySold || 0;
-      const ratingRaw = product.stats?.current?.[16];
-      const reviewCount = product.stats?.current?.[17];
-
-      const offerCount = product.offers?.length || 0;
-      const amazonOffers = product.offers?.filter((o: any) => o.isAmazon).length || 0;
-      const fbaOffers = product.offers?.filter((o: any) => o.isFBA && !o.isAmazon).length || 0;
-
-      const buyBoxIsFBA = (product.stats as any)?.buyBoxIsFBA;
-      const buyBoxIsAmazon = (product.stats as any)?.buyBoxIsAmazon;
-      const buyBoxIsUsed = (product.stats as any)?.buyBoxIsUsed;
-      const buyBoxShippingCountry = (product.stats as any)?.buyBoxShippingCountry;
-      const buyBoxCondition = (product.stats as any)?.buyBoxCondition;
-
-      const referralFee = (product as any).referralFeePercentage;
-      const pickAndPackFee = (product as any).fbaFees?.pickAndPackFee;
-
-      // ── PRECIOS ──
-      const hasBuyBoxNew = buyBoxPrice && buyBoxPrice !== -1;
-      const hasBuyBoxUsed = buyBoxUsedPrice && buyBoxUsedPrice !== -1;
-
-      result += `💰 **PRECIOS:**\n`;
-      if (hasBuyBoxNew) {
-        result += `   • Buy Box: ${this.client.formatPrice(buyBoxPrice, domain)}\n`;
-      } else if (hasBuyBoxUsed) {
-        result += `   • Buy Box (Usado): ${this.client.formatPrice(buyBoxUsedPrice, domain)}\n`;
+      result += `📊 **Categoria**: ${product.productGroup || 'N/A'}\n`;
+      if ((product as any).parentAsin) {
+        result += `🔗 **Parent ASIN**: ${(product as any).parentAsin}\n`;
       }
-      if (currentAmazon && currentAmazon !== -1) result += `   • Amazon (actual): ${this.client.formatPrice(currentAmazon, domain)}\n`;
-      if (avgPrice && avgPrice !== -1) result += `   • Promedio 90d: ${this.client.formatPrice(avgPrice, domain)}\n`;
-      if (minPrice && minPrice !== -1) result += `   • Mínimo 90d: ${this.client.formatPrice(minPrice, domain)}\n`;
-      if (maxPrice && maxPrice !== -1) result += `   • Máximo 90d: ${this.client.formatPrice(maxPrice, domain)}\n`;
+      result += `\n`;
 
-      // ── BUY BOX ──
-      result += `\n🏆 **BUY BOX:**\n`;
-      if (hasBuyBoxNew || hasBuyBoxUsed) {
-        // buyBoxCondition: 1=Nuevo, 2=Como Nuevo, 3=Muy Bueno, 4=Bueno, 5=Aceptable
-        const conditionMap: Record<number, string> = {
-          1: 'Nuevo', 2: 'Usado-Como Nuevo', 3: 'Usado-Muy Bueno',
-          4: 'Usado-Bueno', 5: 'Usado-Aceptable',
-        };
-        const mainCondition = conditionMap[buyBoxCondition] || 'Nuevo';
-        const mainPrice = hasBuyBoxNew ? buyBoxPrice : buyBoxUsedPrice;
+      // ── PRECIOS (con fix de min/max — son arrays 2D [keepaTime, value]) ──
+      if (stats) {
+        const buyBoxPrice = stats.buyBoxPrice;
+        const buyBoxShipping = stats.buyBoxShipping;
+        const buyBoxUsedPrice = stats.buyBoxUsedPrice;
+        const amazonPrice = stats.current?.[0]; // AMAZON = index 0
+        const avgPrice = stats.avg?.[0]; // Media del intervalo stats=90
 
-        result += `   • Precio: ${this.client.formatPrice(mainPrice, domain)} (${mainCondition})\n`;
+        // FIX: min y max son int[][] → min[csvType] = [keepaTime, value] o null
+        const minRaw = stats.minInInterval?.[0]; // minInInterval = dentro del periodo stats
+        const minPrice = Array.isArray(minRaw) ? minRaw[1] : minRaw;
+        const maxRaw = stats.maxInInterval?.[0];
+        const maxPrice = Array.isArray(maxRaw) ? maxRaw[1] : maxRaw;
 
-        let ganador = 'Vendedor FBM 3P';
-        if (buyBoxIsAmazon) ganador = 'Amazon';
-        else if (buyBoxIsFBA) ganador = 'Vendedor FBA 3P';
-        result += `   • Ganador: ${ganador}\n`;
-        if (buyBoxShippingCountry) result += `   • País envío: ${buyBoxShippingCountry}\n`;
+        // Medias por periodo (siempre disponibles, FREE)
+        const avg30 = stats.avg30?.[0];
+        const avg90 = stats.avg90?.[0];
+        const avg180 = stats.avg180?.[0];
 
-        // buyBoxIsUsed = existe TAMBIÉN un Buy Box usado (separado del principal)
-        if (buyBoxIsUsed && hasBuyBoxUsed && hasBuyBoxNew) {
-          result += `   • Buy Box Usado disponible: ${this.client.formatPrice(buyBoxUsedPrice, domain)}\n`;
-        }
-      } else {
-        result += `   • Ganador: Sin Buy Box\n`;
-      }
+        result += `💰 **PRECIOS:**\n`;
 
-      // ── SALES RANK ──
-      if (salesRank && salesRank !== -1) {
-        result += `\n📊 **Sales Rank**: #${salesRank.toLocaleString()}\n`;
-      }
-
-      // ── RESEÑAS ──
-      result += `\n⭐ **RESEÑAS:**\n`;
-      if (ratingRaw && ratingRaw !== -1 && ratingRaw > 0) {
-        result += `   • Rating: ${(ratingRaw / 10).toFixed(1)}/5.0\n`;
-      } else {
-        result += `   • Rating: Sin datos\n`;
-      }
-      if (reviewCount && reviewCount !== -1 && reviewCount > 0) {
-        result += `   • Total: ${reviewCount.toLocaleString()} reseñas\n`;
-      } else {
-        result += `   • Total: Sin datos\n`;
-      }
-
-      // ── COMPETENCIA ──
-      result += `\n🏪 **COMPETENCIA:**\n`;
-      result += `   • Total ofertas: ${offerCount}\n`;
-      result += `   • Ofertas FBA: ${fbaOffers}\n`;
-      result += `   • Ofertas FBM: ${offerCount - fbaOffers - amazonOffers}\n`;
-      result += `   • Amazon vende: ${amazonOffers > 0 ? 'Sí' : 'No'}\n`;
-
-      // ── STOCK ──
-      if (product.offers && product.offers.length > 0) {
-        let buyBoxStock: number | null = null;
-        const buyBoxSellerId = (product.stats as any)?.buyBoxSellerId;
-
-        // Buscar stock del ganador del Buy Box primero
-        for (const offer of product.offers) {
-          const stockCSV = (offer as any).stockCSV;
-          if (!stockCSV || stockCSV.length < 2) continue;
-          if ((buyBoxSellerId && offer.sellerId === buyBoxSellerId) ||
-              offer.isBuyBoxWinner || offer.isAmazon) {
-            buyBoxStock = stockCSV[stockCSV.length - 1];
-            break;
+        // Buy Box principal
+        if (buyBoxPrice && buyBoxPrice > 0) {
+          let bbText = `   • Buy Box: ${this.client.formatPrice(buyBoxPrice, domain)}`;
+          if (buyBoxShipping && buyBoxShipping > 0) {
+            bbText += ` (+${this.client.formatPrice(buyBoxShipping, domain)} envío)`;
           }
+          result += bbText + `\n`;
+        }
+        if (amazonPrice && amazonPrice > 0 && amazonPrice !== buyBoxPrice) {
+          result += `   • Amazon: ${this.client.formatPrice(amazonPrice, domain)}\n`;
         }
 
-        // Si no encontramos del Buy Box, tomar el mayor stock de ofertas vivas
-        if (buyBoxStock === null) {
-          const liveIndexes = (product as any).liveOffersOrder as number[] | null;
-          if (liveIndexes && liveIndexes.length > 0) {
-            for (const idx of liveIndexes) {
-              const offer = product.offers[idx];
-              if (!offer) continue;
-              const stockCSV = (offer as any).stockCSV;
-              if (stockCSV && stockCSV.length >= 2) {
-                const qty = stockCSV[stockCSV.length - 1];
-                if (qty > 0 && (buyBoxStock === null || qty > buyBoxStock)) {
-                  buyBoxStock = qty;
-                }
-              }
+        // Estadísticas de precio (FREE con stats=90)
+        if (avg90 && avg90 > 0) {
+          result += `   • Promedio 90d: ${this.client.formatPrice(avg90, domain)}`;
+          // Tendencia: comparar avg30 vs avg90
+          if (avg30 && avg30 > 0 && avg90 > 0) {
+            const diff = ((avg30 - avg90) / avg90) * 100;
+            if (Math.abs(diff) >= 1) {
+              result += diff > 0 ? ` (📈 +${diff.toFixed(1)}% vs 30d)` : ` (📉 ${diff.toFixed(1)}% vs 30d)`;
             }
           }
+          result += `\n`;
+        }
+        if (minPrice && minPrice > 0) {
+          result += `   • Mínimo 90d: ${this.client.formatPrice(minPrice, domain)}\n`;
+        }
+        if (maxPrice && maxPrice > 0) {
+          result += `   • Máximo 90d: ${this.client.formatPrice(maxPrice, domain)}\n`;
         }
 
-        if (buyBoxStock !== null && buyBoxStock > 0) {
-          result += `\n📦 **STOCK**: ${buyBoxStock} unidades disponibles\n`;
+        // Descuento/Saving (si hay precio tachado)
+        if (stats.buyBoxSavingBasis && stats.buyBoxSavingBasis > 0) {
+          const savingType = stats.buyBoxSavingBasisType === 'WAS_PRICE' ? 'Precio anterior' : 'PVP';
+          result += `   • ${savingType}: ${this.client.formatPrice(stats.buyBoxSavingBasis, domain)}`;
+          if (stats.buyBoxSavingPercentage) {
+            result += ` (-${stats.buyBoxSavingPercentage}%)`;
+          }
+          result += `\n`;
         }
-      }
 
-      // ── VELOCIDAD DE VENTAS ──
-      if (monthlySold > 0) {
-        result += `\n📈 **VELOCIDAD DE VENTAS (30 días):**\n`;
-        result += `   • Mensuales: ${monthlySold} unidades\n`;
-        result += `   • Diarias: ${(monthlySold / 30).toFixed(1)} unidades\n`;
-        result += `   • Semanales: ${(monthlySold / 4.3).toFixed(1)} unidades\n`;
-      }
+        // Cupones activos
+        const coupon = (product as any).coupon;
+        if (coupon && Array.isArray(coupon)) {
+          const [oneTime, sns] = coupon;
+          if (oneTime > 0) result += `   • 🎟️ Cupón: -${this.client.formatPrice(oneTime, domain)}\n`;
+          else if (oneTime < 0) result += `   • 🎟️ Cupón: -${Math.abs(oneTime)}%\n`;
+          if (sns > 0) result += `   • 🎟️ Cupón S&S: -${this.client.formatPrice(sns, domain)}\n`;
+          else if (sns < 0) result += `   • 🎟️ Cupón S&S: -${Math.abs(sns)}%\n`;
+        }
 
-      // ── COSTES AMAZON ──
-      result += `\n💶 **COSTES AMAZON:**\n`;
-      if (referralFee) result += `   • Comisión referral: ${referralFee}%\n`;
-      if (pickAndPackFee) result += `   • Tarifa FBA: ${this.client.formatPrice(pickAndPackFee, domain)}\n`;
+        result += `\n`;
 
-      // ── VARIACIONES ──
-      if (params.variations && product.variations && product.variations.length > 0) {
-        result += `\n🔄 **VARIACIONES**: ${product.variations.length} disponibles\n`;
+        // ── BUY BOX (con condición correcta via buyBoxCondition) ──
+        result += `🏆 **BUY BOX:**\n`;
+        const hasBuyBoxNew = buyBoxPrice && buyBoxPrice > 0;
+        const hasBuyBoxUsed = buyBoxUsedPrice && buyBoxUsedPrice > 0;
+
+        if (hasBuyBoxNew || hasBuyBoxUsed) {
+          // Condición del Buy Box principal (buyBoxCondition del Statistics Object)
+          const buyBoxCondition = stats.buyBoxCondition;
+          const conditionMap: Record<number, string> = {
+            1: 'Nuevo', 2: 'Usado-Como Nuevo', 3: 'Usado-Muy Bueno',
+            4: 'Usado-Bueno', 5: 'Usado-Aceptable',
+          };
+
+          if (hasBuyBoxNew) {
+            const mainCondition = conditionMap[buyBoxCondition] || 'Nuevo';
+            result += `   • Precio: ${this.client.formatPrice(buyBoxPrice, domain)} (${mainCondition})\n`;
+
+            // Ganador
+            let ganador = 'Vendedor FBM 3P';
+            if (stats.buyBoxIsAmazon) ganador = 'Amazon';
+            else if (stats.buyBoxIsFBA) ganador = 'Vendedor FBA 3P';
+            result += `   • Ganador: ${ganador}\n`;
+
+            // Fulfillment / Prime
+            if (stats.buyBoxIsFBA) result += `   • Fulfillment: FBA ✓\n`;
+            if (stats.buyBoxIsPrimeEligible) result += `   • Prime: ✅\n`;
+          }
+
+          if (hasBuyBoxUsed) {
+            const usedCondition = conditionMap[stats.buyBoxUsedCondition] || 'Usado';
+            if (hasBuyBoxNew) {
+              result += `   • BB Usado: ${this.client.formatPrice(buyBoxUsedPrice, domain)} (${usedCondition})\n`;
+            } else {
+              result += `   • Precio: ${this.client.formatPrice(buyBoxUsedPrice, domain)} (${usedCondition})\n`;
+              if (stats.buyBoxUsedIsFBA) result += `   • Fulfillment: FBA ✓\n`;
+            }
+          }
+
+          // Mensaje de disponibilidad
+          if (stats.buyBoxAvailabilityMessage) {
+            result += `   • Disponibilidad: ${stats.buyBoxAvailabilityMessage}\n`;
+          }
+
+          // Subscribe & Save
+          if ((product as any).isSNS) {
+            result += `   • 🔄 Subscribe & Save: Disponible\n`;
+          }
+
+          // Min/Max order quantity
+          if (stats.buyBoxMinOrderQuantity && stats.buyBoxMinOrderQuantity > 1) {
+            result += `   • Cantidad mínima: ${stats.buyBoxMinOrderQuantity}\n`;
+          }
+          if (stats.buyBoxMaxOrderQuantity && stats.buyBoxMaxOrderQuantity > 0) {
+            result += `   • Cantidad máxima: ${stats.buyBoxMaxOrderQuantity}\n`;
+          }
+
+          // País de envío
+          if (stats.buyBoxShippingCountry) {
+            result += `   • País envío: ${stats.buyBoxShippingCountry}\n`;
+          }
+        } else {
+          result += `   • Ganador: Sin Buy Box\n`;
+          if (stats.buyBoxIsUnqualified) {
+            result += `   • Nota: Ningún vendedor calificado para BB\n`;
+          }
+        }
+        result += `\n`;
+
+        // ── STOCK (stats.stockBuyBox / stats.stockAmazon — requiere stock=true) ──
+        const stockBuyBox = stats.stockBuyBox;
+        const stockAmazon = stats.stockAmazon;
+        if ((stockBuyBox !== undefined && stockBuyBox > 0) || (stockAmazon !== undefined && stockAmazon > 0)) {
+          result += `📦 **STOCK:**\n`;
+          if (stockBuyBox !== undefined && stockBuyBox > 0) {
+            result += `   • Buy Box: ${stockBuyBox} unidades\n`;
+          }
+          if (stockAmazon !== undefined && stockAmazon > 0 && stockAmazon !== stockBuyBox) {
+            result += `   • Amazon: ${stockAmazon} unidades\n`;
+          }
+          result += `\n`;
+        }
+
+        // ── SALES RANK ──
+        const currentSalesRank = stats.current?.[3]; // SALES = index 3
+        if (currentSalesRank && currentSalesRank > 0) {
+          result += `📊 **Sales Rank**: #${currentSalesRank.toLocaleString()}\n`;
+          // Drops = proxy de ventas
+          if (stats.salesRankDrops30 !== undefined && stats.salesRankDrops30 >= 0) {
+            result += `   • Drops 30d: ${stats.salesRankDrops30} (≈ ventas estimadas)\n`;
+          }
+          if (stats.salesRankDrops90 !== undefined && stats.salesRankDrops90 >= 0) {
+            result += `   • Drops 90d: ${stats.salesRankDrops90}\n`;
+          }
+          result += `\n`;
+        }
+
+        // ── VENTAS MENSUALES (dato real de Amazon, no estimación) ──
+        const monthlySold = (product as any).monthlySold;
+        if (monthlySold && monthlySold > 0) {
+          const dailySold = Math.round((monthlySold / 30) * 10) / 10;
+          const weeklySold = Math.round((monthlySold / 4.3) * 10) / 10;
+          result += `📈 **VELOCIDAD DE VENTAS (30 días):**\n`;
+          result += `   • Mensuales: ${monthlySold.toLocaleString()} unidades\n`;
+          result += `   • Diarias: ${dailySold} unidades\n`;
+          result += `   • Semanales: ${weeklySold} unidades\n`;
+          result += `\n`;
+        }
+
+        // ── RESEÑAS ──
+        const rating = stats.current?.[16]; // RATING index 16 (0-50)
+        const reviewCount = stats.current?.[17]; // COUNT_REVIEWS index 17
+        if (rating && rating > 0) {
+          result += `⭐ **RESEÑAS:**\n`;
+          result += `   • Rating: ${(rating / 10).toFixed(1)}/5.0\n`;
+          if (reviewCount && reviewCount > 0) {
+            result += `   • Total: ${reviewCount.toLocaleString()} reseñas\n`;
+          }
+          result += `\n`;
+        }
+
+        // ── COMPETENCIA ──
+        result += `🏪 **COMPETENCIA:**\n`;
+        if (stats.totalOfferCount !== undefined) {
+          result += `   • Total ofertas: ${stats.totalOfferCount}\n`;
+        }
+        if (stats.offerCountFBA !== undefined && stats.offerCountFBA >= 0) {
+          result += `   • Ofertas FBA: ${stats.offerCountFBA}\n`;
+        }
+        if (stats.offerCountFBM !== undefined && stats.offerCountFBM >= 0) {
+          result += `   • Ofertas FBM: ${stats.offerCountFBM}\n`;
+        }
+        if (stats.buyBoxIsAmazon) {
+          result += `   • Amazon vende: Sí\n`;
+        }
+        // Seller IDs del FBA/FBM más barato
+        if (stats.sellerIdsLowestFBA && stats.sellerIdsLowestFBA.length > 0) {
+          result += `   • Vendedor FBA más barato: ${stats.sellerIdsLowestFBA[0]}\n`;
+        }
+        result += `\n`;
+
+        // ── OUT OF STOCK % ──
+        const oosAmazon90 = stats.outOfStockPercentage90?.[0]; // AMAZON = index 0
+        if (oosAmazon90 !== undefined && oosAmazon90 >= 0) {
+          result += `📉 **OUT OF STOCK:**\n`;
+          result += `   • Amazon OOS 90d: ${oosAmazon90}%\n`;
+          const oosNew90 = stats.outOfStockPercentage90?.[1]; // NEW = index 1
+          if (oosNew90 !== undefined && oosNew90 >= 0) {
+            result += `   • Marketplace OOS 90d: ${oosNew90}%\n`;
+          }
+          result += `\n`;
+        }
+
+        // ── DEALS ACTIVOS ──
+        const deals = (product as any).deals;
+        if (deals && Array.isArray(deals) && deals.length > 0) {
+          result += `🔥 **DEALS ACTIVOS:**\n`;
+          for (const deal of deals) {
+            result += `   • ${deal.badge || deal.dealType}`;
+            if (deal.percentClaimed > 0) result += ` (${deal.percentClaimed}% reclamado)`;
+            if (deal.accessType === 'PRIME_EXCLUSIVE') result += ` [Prime]`;
+            result += `\n`;
+          }
+          result += `\n`;
+        }
+
+        // ── BB STATS (quién gana el BB y con qué %) ──
+        if (stats.buyBoxStats && typeof stats.buyBoxStats === 'object') {
+          const bbEntries = Object.entries(stats.buyBoxStats) as [string, any][];
+          if (bbEntries.length > 0) {
+            result += `🏆 **BB SHARE (90d):**\n`;
+            // Ordenar por % ganado
+            bbEntries.sort((a, b) => (b[1]?.percentageWon || 0) - (a[1]?.percentageWon || 0));
+            for (const [sellerId, data] of bbEntries.slice(0, 5)) {
+              const name = sellerId === 'ATVPDKIKX0DER' ? 'Amazon' : sellerId;
+              const pct = data?.percentageWon?.toFixed(1) || '?';
+              const isFBA = data?.isFBA ? ' (FBA)' : ' (FBM)';
+              result += `   • ${name}${isFBA}: ${pct}%\n`;
+            }
+            result += `\n`;
+          }
+        }
+
+        // ── COSTES AMAZON (si disponibles) ──
+        const fbaFees = (product as any).fbaFees;
+        const referralFee = (product as any).referralFeePercentage;
+        const competitivePrice = (product as any).competitivePriceThreshold;
+        if (fbaFees || referralFee || competitivePrice) {
+          result += `💶 **COSTES AMAZON:**\n`;
+          if (referralFee) {
+            result += `   • Comisión referral: ${referralFee}%\n`;
+          }
+          if (fbaFees?.pickAndPackFee) {
+            result += `   • Tarifa FBA: ${this.client.formatPrice(fbaFees.pickAndPackFee, domain)}\n`;
+          }
+          if (competitivePrice && competitivePrice > 0) {
+            result += `   • Precio competitivo (máx para BB): ${this.client.formatPrice(competitivePrice, domain)}\n`;
+          }
+          const suggestedLower = (product as any).suggestedLowerPrice;
+          if (suggestedLower && suggestedLower > 0) {
+            result += `   • Precio sugerido Amazon: ${this.client.formatPrice(suggestedLower, domain)}\n`;
+          }
+          result += `\n`;
+        }
+
+        // ── INFO ADICIONAL ──
+        const additionalInfo: string[] = [];
+        if ((product as any).isAdultProduct) additionalInfo.push('🔞 Producto adulto');
+        if (stats.isAddonItem) additionalInfo.push('📎 Add-on Item');
+        if ((product as any).isEligibleForSuperSaverShipping) additionalInfo.push('🚚 Envío gratis elegible');
+        if ((product as any).isEligibleForTradeIn) additionalInfo.push('♻️ Trade-in elegible');
+        const returnRate = (product as any).returnRate;
+        if (returnRate === 1) additionalInfo.push('✅ Tasa devolución baja');
+        else if (returnRate === 2) additionalInfo.push('⚠️ Tasa devolución alta');
+        if ((product as any).newPriceIsMAP) additionalInfo.push('🔒 Precio MAP');
+
+        if (additionalInfo.length > 0) {
+          result += `ℹ️ **INFO ADICIONAL:** ${additionalInfo.join(' | ')}\n\n`;
+        }
+
+      } else {
+        result += `⚠️ No hay datos estadísticos disponibles para este producto.\n`;
       }
 
       return result;
     } catch (error) {
-      return `Error looking up product: ${error instanceof Error ? error.message : 'Unknown error'}`;
+      return `Error looking up product: ${error instanceof Error ? error.message : String(error)}`;
     }
   }
   async batchLookupProducts(params: z.infer<typeof BatchProductLookupSchema>): Promise<string> {
