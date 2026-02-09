@@ -46,7 +46,8 @@ export const BestSellersSchema = z.object({
 });
 
 export const PriceHistorySchema = z.object({
-  asin: z.string().describe('Amazon ASIN'),
+  asin: z.string().optional().describe('Amazon ASIN'),
+  code: z.string().optional().describe('EAN, UPC or ISBN-13 code'),
   domain: z.number().min(1).max(11).default(9).describe('Amazon domain (9=ES)'),
   days: z.number().min(1).max(365).default(90).describe('Days of history (1-365)'),
   dataType: z.number().optional().describe('Specific CsvType index (0=Amazon, 1=New, 2=Used, 3=SalesRank, 18=BuyBox). If omitted, shows all relevant types.'),
@@ -716,11 +717,23 @@ export class KeepaTools {
         queryOptions['only-live-offers'] = 1;
       }
 
-      const product = await this.client.getProductByAsin(
-        params.asin,
-        params.domain as KeepaDomain,
-        queryOptions
-      );
+      let product;
+      if (params.code) {
+        const products = await this.client.getProduct({
+          code: params.code,
+          domain: params.domain as KeepaDomain,
+          ...queryOptions,
+        });
+        product = products?.[0];
+      } else if (params.asin) {
+        product = await this.client.getProductByAsin(
+          params.asin,
+          params.domain as KeepaDomain,
+          queryOptions
+        );
+      } else {
+        return 'Error: Se necesita ASIN o código EAN/UPC';
+      }
 
       if (!product) {
         return `Producto no encontrado: ${params.asin}`;
