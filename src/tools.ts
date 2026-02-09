@@ -141,8 +141,8 @@ export class KeepaTools {
         days: params.days || 1,   // Solo datos recientes para offers (reduce respuesta)
         history: false,           // No parseamos csv[] aquí → reduce respuesta ~80%
         offers: params.offers || 20, // 6-12 tokens: ofertas, BB, rating, reviews actualizados
-        stock: true,              // 2 tokens: stats.stockBuyBox + stats.stockAmazon
-        'only-live-offers': true, // FREE: excluye ofertas históricas → reduce respuesta
+        stock: 1,              // 2 tokens: stats.stockBuyBox + stats.stockAmazon
+        'only-live-offers': 1, // FREE: excluye ofertas históricas → reduce respuesta
         // rating: ELIMINADO — redundante cuando se usa offers (doc: "use offers for up-to-date data")
         // buybox: ELIMINADO — ignorado cuando se usa offers (doc: "buybox parameter is ignored")
         variations: params.variations,
