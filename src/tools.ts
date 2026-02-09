@@ -737,8 +737,13 @@ export class KeepaTools {
       const titleShort = product.title
         ? (product.title.length > 60 ? product.title.substring(0, 57) + '...' : product.title)
         : 'N/A';
-      const bbPrice = stats?.buyBoxPrice && stats.buyBoxPrice > 0
-        ? this.client.formatPrice(stats.buyBoxPrice, domain)
+      const currentPrice = stats?.buyBoxPrice > 0
+        ? stats.buyBoxPrice
+        : stats?.current?.[0] > 0
+          ? stats.current[0]
+          : null;
+      const bbPrice = currentPrice
+        ? this.client.formatPrice(currentPrice, domain)
         : 'N/A';
 
       let result = `📦 **${params.asin}** — ${titleShort} | 🏷️ BB: ${bbPrice}\n`;
