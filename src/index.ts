@@ -95,13 +95,13 @@ const TOOL_DEFINITIONS: Tool[] = [
   },
   {
     name: 'keepa_seller_lookup',
-    description: 'Look up seller information and performance metrics',
+    description: 'Consulta información de vendedores de Amazon: identidad, reputación, Buy Box, portfolio de marcas/categorías y competidores. Soporta batch de hasta 100 sellers separados por comas.',
     inputSchema: {
       type: 'object',
       properties: {
-        seller: { type: 'string', description: 'Seller ID or name' },
-        domain: { type: 'number', minimum: 1, maximum: 11, default: 1, description: 'Amazon domain (1=US, 2=UK, 3=DE, etc.)' },
-        storefront: { type: 'number', minimum: 0, maximum: 100000, description: 'Number of storefront ASINs to retrieve' },
+        seller: { type: 'string', description: 'Seller ID (ej: A3P5ROKL5A1OLE). Para batch: IDs separados por comas, máximo 100. NO usar batch con storefront.' },
+        domain: { type: 'number', minimum: 1, maximum: 11, default: 9, description: 'Amazon domain (1=US, 2=UK, 3=DE, 4=FR, 5=JP, 6=CA, 8=IT, 9=ES, 10=IN, 11=MX)' },
+        storefront: { type: 'boolean', default: false, description: 'Incluir lista de ASINs del vendedor (+9 tokens Keepa). Solo para consultas individuales, NO batch.' }
       },
       required: ['seller'],
     },
