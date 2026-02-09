@@ -335,9 +335,31 @@ export class KeepaClient {
     return 'LOW';
   }
 
-  async getSeller(params: SellerQueryParams): Promise<KeepaSeller[]> {
-    const response = await this.makeRequest<{ sellers: KeepaSeller[] }>('/seller', params);
-    return (response as any).sellers || [];
+ async getSeller(params: SellerQueryParams): Promise<KeepaSeller[]> {
+    const queryParams: Record<string, any> = {
+      seller: params.seller,
+      domain: params.domain || 9,
+    };
+
+    // CRITICAL: Keepa booleans must be 0/1, not true/false
+    if (params.storefront) {
+      queryParams.storefront = 1;
+    }
+    if (params.update !== undefined) {
+      queryParams.update = params.update;
+    }
+
+    const response = await this.makeRequest<any>('/seller', queryParams);
+
+    // CRITICAL FIX: Response.sellers is a MAP { sellerId: sellerObject }, NOT an array
+    // Old code treated it as array which always returned empty
+    const sellersMap = (response as any).sellers;
+    if (!sellersMap || typeof sellersMap !== 'object') {
+      return [];
+    }
+
+    // Convert map to array of seller objects
+    return Object.values(sellersMap) as KeepaSeller[];
   }
 
   // NEW: Category Analysis for Market Intelligence
