@@ -167,18 +167,74 @@ export interface KeepaDeal {
 }
 
 export interface KeepaSeller {
+  // Identity
+  domainId: number;
   sellerId: string;
   sellerName: string;
-  isScammer: boolean;
-  hasFBM: boolean;
+  businessName?: string;
+  address?: string[];
+  tradeNumber?: string;
+  vatID?: string;
+  phoneNumber?: string;
+  businessType?: string;
+  shareCapital?: string;
+  representative?: string;
+  email?: string;
+  customerServicesAddress?: string[];
+
+  // Tracking timestamps (Keepa Time minutes)
+  trackingSince: number;
+  lastUpdate: number;
+  lastRatingUpdate?: number;
+
+  // Rating history: csv[0] = rating% (0-100), csv[1] = ratingCount
+  // Format: [keepaTime, value, keepaTime, value, ...]
+  csv?: number[][];
+
+  // Historical rating arrays [keepaTime, value, ...]
+  ratingCount?: number[];
+  positiveRating?: number[];
+  negativeRating?: number[];
+  neutralRating?: number[];
+
+  // Feedback
+  recentFeedback?: Array<{
+    date: number;       // Keepa Time minutes
+    rating: number;     // 10=1star, 20=2stars, ... 50=5stars
+    feedback: string;
+    isStriked: boolean;
+  }>;
+
+  // Operations
   hasFBA: boolean;
-  isAmazon: boolean;
-  totalStorefrontAsins?: number;
-  avgRating?: number;
-  ratingCount?: number;
-  startDate?: number;
-  sellerCSV?: string;
-  storefront?: string[];
+  totalStorefrontAsins?: number[];  // [keepaTime, count] or null
+
+  // Storefront (only with storefront=1 param)
+  asinList?: string[];
+  asinListLastSeen?: number[];
+
+  // Portfolio analytics (always included, based on Keepa's offers DB)
+  sellerCategoryStatistics?: Array<{
+    catId: number;
+    productCount: number;
+    avg30SalesRank: number;
+    productCountWithAmazonOffer: number;
+  }>;
+  sellerBrandStatistics?: Array<{
+    brand: string;
+    productCount: number;
+    avg30SalesRank: number;
+    productCountWithAmazonOffer: number;
+  }>;
+
+  // Competition (always included)
+  competitors?: Array<{
+    sellerId: string;
+    percent: number;
+  }>;
+  avgBuyBoxCompetitors?: number;
+  buyBoxNewOwnershipRate?: number;
+  buyBoxUsedOwnershipRate?: number;
 }
 
 export interface KeepaBestSeller {
